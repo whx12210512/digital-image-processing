@@ -71,13 +71,18 @@ def add_partial_occlusion(img, x, y, w, h):
 
 
 def perspective_distort(img, intensity=0.3):
-    """Apply a mild perspective distortion using PIL transforms."""
+    """Apply true perspective distortion — converging lines effect.
+
+    Uses a projective transform (non-zero g, h) so parallel bar edges converge,
+    simulating a barcode photographed at an oblique angle.
+    """
     w, h = img.size
-    # Shift top corners inward
+    # True perspective: g and h are non-zero, creating x/y-dependent scaling
+    # Right side compresses, top tilts slightly backward
     coeffs = [
-        1 - intensity * 0.3, 0, intensity * w * 0.1,
-        0.05, 1 - intensity * 0.1, intensity * h * 0.05,
-        0, 0,
+        1.0, 0, 0,                                    # a, b, c (x numerator)
+        0.02 * intensity, 1.0, intensity * h * 0.03,  # d, e, f (y numerator)
+        intensity / (w * 3.0), intensity / (h * 8.0), # g, h (denominator)
     ]
     return img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BICUBIC, fillcolor='white')
 
@@ -300,7 +305,10 @@ def generate_all():
     print("--- Barcode advanced degradation ---")
     barcode_files_map = {}
     for f in os.listdir(OUTPUT_DIR):
-        if f.startswith('barcode_') and f.endswith('.png') and '_rotated_' not in f and '_noisy_' not in f and '_blurred_' not in f:
+        if f.startswith('barcode_') and f.endswith('.png') \
+                and '_rotated_' not in f and '_noisy_' not in f and '_blurred_' not in f \
+                and '_perspective_' not in f and '_occluded' not in f \
+                and '_lighting_' not in f and '_complex_bg' not in f:
             fmt_key = f.split('_')[1]
             if fmt_key not in barcode_files_map:
                 barcode_files_map[fmt_key] = []
@@ -312,8 +320,8 @@ def generate_all():
             base = fname.replace('.png', '')
             img = Image.open(os.path.join(OUTPUT_DIR, fname)).convert('RGB')
 
-            # Perspective distortion
-            for intensity in [0.25, 0.4]:
+            # Perspective distortion (lower intensity for 1D barcodes)
+            for intensity in [0.12, 0.25]:
                 persp = perspective_distort(img, intensity)
                 out = f"{base}_perspective_{int(intensity*100)}.png"
                 persp.save(os.path.join(OUTPUT_DIR, out))

@@ -94,6 +94,32 @@ def run_pipeline(img, adaptive=True, visualize=False):
                     results = try_pyzbar(rotated)
                     if results:
                         break
+
+            # Try CLAHE enhancement (improves local contrast for faded bars)
+            if not results:
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                enhanced_gray = clahe.apply(gray)
+                results = try_pyzbar(enhanced_gray)
+                if not results:
+                    results = try_pyzbar(cv2.GaussianBlur(enhanced_gray, (3, 3), 0))
+
+            # Try adaptive threshold binarization (handles uneven shading)
+            if not results:
+                for block in [21, 31, 41]:
+                    for c in [5, 9, 13]:
+                        binary = cv2.adaptiveThreshold(gray, 255,
+                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, c)
+                        results = try_pyzbar(binary)
+                        if results:
+                            break
+                    if results:
+                        break
+
+            # Try binary inverse (white-on-black barcodes)
+            if not results:
+                inverted = cv2.adaptiveThreshold(gray, 255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 9)
+                results = try_pyzbar(inverted)
         except ImportError:
             pass
 

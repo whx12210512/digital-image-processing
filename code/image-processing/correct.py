@@ -178,10 +178,12 @@ def correct_qr_perspective(img, qr_corners, target_size=300):
     return four_point_transform(img, qr_corners, (target_size, target_size))
 
 
-def correct_barcode_perspective(img, barcode_rect, target_height=120):
-    """Extract a barcode region using its rotated rect, warping it horizontal.
+def correct_barcode_perspective(img, barcode_rect, target_width=400, target_height=120):
+    """Extract and perspective-correct a barcode region.
 
-    Uses a simpler bounding-box + rotation approach for robustness.
+    Returns a list of candidate corrected images:
+      [0] full 4-point perspective warp (handles perspective distortion)
+      [1] rotation-based extraction (fallback for pure rotation)
     """
     center, size, angle = barcode_rect
     rw, rh = size
@@ -200,18 +202,61 @@ def correct_barcode_perspective(img, barcode_rect, target_height=120):
     elif angle < -45:
         angle += 90
 
-    h_img, w_img = img.shape[:2]
+    candidates = []
 
-    # Build rotation matrix around barcode center
+    # Candidate 1: full 4-point perspective warp (narrow margins)
+    margin_w = rw * 0.12
+    margin_h = rh * 0.40
+    expanded_rect = (center, (rw + margin_w, rh + margin_h), angle)
+    src_pts = cv2.boxPoints(expanded_rect)
+    src_pts = order_points(src_pts)
+    roi_persp = four_point_transform(img, src_pts, (target_width, target_height))
+    if roi_persp is not None and roi_persp.size > 100:
+        candidates.append(roi_persp)
+
+    # Candidate 2: perspective warp with wider margins + higher resolution
+    margin_w2 = rw * 0.18
+    margin_h2 = rh * 0.60
+    expanded_rect2 = (center, (rw + margin_w2, rh + margin_h2), angle)
+    src_pts2 = cv2.boxPoints(expanded_rect2)
+    src_pts2 = order_points(src_pts2)
+    roi_persp2 = four_point_transform(img, src_pts2,
+                                      (int(target_width * 1.4), int(target_height * 1.3)))
+    if roi_persp2 is not None and roi_persp2.size > 100:
+        candidates.append(roi_persp2)
+
+    # Candidate 3: contour-based quadrilateral detection + warp
+    h_img, w_img = img.shape[:2]
+    cx, cy = int(center[0]), int(center[1])
+    pad_x = int(rw * 0.3 + 30)
+    pad_y = int(rh * 1.5 + 30)
+    rx1 = max(0, cx - pad_x)
+    rx2 = min(w_img, cx + pad_x)
+    ry1 = max(0, cy - pad_y)
+    ry2 = min(h_img, cy + pad_y)
+
+    if rx2 > rx1 + 40 and ry2 > ry1 + 20:
+        roi = img[ry1:ry2, rx1:rx2]
+        refined_pts = detect_barcode_quadrilateral(roi)
+        if refined_pts is not None:
+            # Map back to original image coordinates
+            refined_pts[:, 0] += rx1
+            refined_pts[:, 1] += ry1
+            refined_pts = order_points(refined_pts)
+            roi_refined = four_point_transform(img, refined_pts,
+                                               (int(target_width * 1.4), int(target_height * 1.3)))
+            if roi_refined is not None and roi_refined.size > 100:
+                candidates.append(roi_refined)
+
+    # Candidate 4: rotation-based extraction (fallback for pure rotation)
+    h_img, w_img = img.shape[:2]
     rot_mat = cv2.getRotationMatrix2D(tuple(center), angle, 1.0)
     rotated = cv2.warpAffine(img, rot_mat, (w_img, h_img),
                              borderMode=cv2.BORDER_CONSTANT, borderValue=255)
 
-    # After rotation, the barcode center is at the same position
     cx, cy = int(center[0]), int(center[1])
     half_w = int(rw * 0.65)
-    # Barcode bars are thin — expand vertically 3x to capture quiet zones and text
-    half_h = max(int(rh * 2.5), 40)
+    half_h = max(int(rh * 2.8), 45)
     if half_w < 60:
         half_w = 80
 
@@ -220,11 +265,59 @@ def correct_barcode_perspective(img, barcode_rect, target_height=120):
     y1 = max(0, cy - half_h)
     y2 = min(h_img, cy + half_h)
 
-    if x2 <= x1 or y2 <= y1:
+    if x2 > x1 and y2 > y1:
+        roi_rot = rotated[y1:y2, x1:x2]
+        if roi_rot.size > 100:
+            candidates.append(roi_rot)
+
+    return candidates if candidates else None
+
+
+def detect_barcode_quadrilateral(roi):
+    """Detect the 4 corners of a barcode quadrilateral using contour analysis.
+
+    Returns 4x2 np.float32 points, or None if detection fails.
+    """
+    if len(roi.shape) == 3:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = roi.copy()
+
+    # Binarize with Otsu
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Ensure barcode bars are black on white
+    if cv2.countNonZero(binary) < binary.size * 0.3:
+        binary = cv2.bitwise_not(binary)
+
+    # Morph close to connect barcode into one solid blob
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5))
+    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
         return None
 
-    roi = rotated[y1:y2, x1:x2]
-    return roi
+    largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < 200:
+        return None
+
+    # Convex hull → approximate to quadrilateral
+    hull = cv2.convexHull(largest)
+    peri = cv2.arcLength(hull, True)
+    approx = cv2.approxPolyDP(hull, 0.04 * peri, True)
+
+    if len(approx) == 4:
+        return approx.reshape(4, 2).astype(np.float32)
+
+    # If not exactly 4 points, try with looser epsilon
+    approx2 = cv2.approxPolyDP(hull, 0.08 * peri, True)
+    if len(approx2) == 4:
+        return approx2.reshape(4, 2).astype(np.float32)
+
+    # Last resort: use bounding rect corners
+    rect = cv2.minAreaRect(largest)
+    pts = cv2.boxPoints(rect)
+    return pts.astype(np.float32)
 
 
 def order_points(pts):
@@ -253,14 +346,16 @@ def correct_region(img, localization_result):
     # Correct barcode regions (elongated)
     for rect, conf in localization_result.get('barcode_rects', []):
         try:
-            corrected_img = correct_barcode_perspective(gray, rect)
-            if corrected_img is not None:
-                results.append({
-                    'image': corrected_img,
-                    'type': 'barcode',
-                    'rect': rect,
-                    'confidence': conf,
-                })
+            candidates = correct_barcode_perspective(gray, rect)
+            if candidates:
+                for i, cand in enumerate(candidates):
+                    results.append({
+                        'image': cand,
+                        'type': 'barcode',
+                        'rect': rect,
+                        'confidence': conf * (1.0 if i == 0 else 0.8),
+                        'candidate': i,
+                    })
         except Exception:
             continue
 
