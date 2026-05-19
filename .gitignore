@@ -30,3 +30,18 @@ results/*_result.png
 code/scanner-app/cert.pem
 code/scanner-app/key.pem
 code/scanner-app/server_https.py
+
+# Node
+node_modules/
+
+# Android
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/captures/
+*.apk
+!docs/scanner.apk
+
+# Capacitor
+www/
