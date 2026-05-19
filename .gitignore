@@ -25,3 +25,8 @@ _debug_*
 
 # Results
 results/*_result.png
+
+# Local dev server (HTTPS certs + helper)
+code/scanner-app/cert.pem
+code/scanner-app/key.pem
+code/scanner-app/server_https.py

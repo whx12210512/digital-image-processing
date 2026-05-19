@@ -296,6 +296,61 @@ def generate_all():
             except Exception as e:
                 print(f"  Warning: {fmt} '{data}': {e}")
 
+    # --- Barcode advanced degradation: perspective, occlusion, lighting, complex bg ---
+    print("--- Barcode advanced degradation ---")
+    barcode_files_map = {}
+    for f in os.listdir(OUTPUT_DIR):
+        if f.startswith('barcode_') and f.endswith('.png') and '_rotated_' not in f and '_noisy_' not in f and '_blurred_' not in f:
+            fmt_key = f.split('_')[1]
+            if fmt_key not in barcode_files_map:
+                barcode_files_map[fmt_key] = []
+            barcode_files_map[fmt_key].append(f)
+
+    for fmt_key in sorted(barcode_files_map.keys()):
+        files = sorted(barcode_files_map[fmt_key])[:3]
+        for fname in files:
+            base = fname.replace('.png', '')
+            img = Image.open(os.path.join(OUTPUT_DIR, fname)).convert('RGB')
+
+            # Perspective distortion
+            for intensity in [0.25, 0.4]:
+                persp = perspective_distort(img, intensity)
+                out = f"{base}_perspective_{int(intensity*100)}.png"
+                persp.save(os.path.join(OUTPUT_DIR, out))
+                count += 1
+                print(f"  [{count}] {out}")
+
+            # Occlusion (block middle section)
+            w, h = img.size
+            occ = add_partial_occlusion(img, int(w * 0.35), int(h * 0.1), int(w * 0.3), int(h * 0.8))
+            out = f"{base}_occluded.png"
+            occ.save(os.path.join(OUTPUT_DIR, out))
+            count += 1
+            print(f"  [{count}] {out}")
+
+            # Uneven lighting
+            for factor in [0.4, 0.6]:
+                lit = apply_uneven_lighting(img, factor)
+                out = f"{base}_lighting_{int(factor*100)}.png"
+                lit.save(os.path.join(OUTPUT_DIR, out))
+                count += 1
+                print(f"  [{count}] {out}")
+
+            # Complex background
+            w, h = img.size
+            canvas = Image.new('RGB', (w + 80, h + 80), 'white')
+            draw = ImageDraw.Draw(canvas)
+            np.random.seed(hash(base) % 10000)
+            for _ in range(25):
+                x1, y1 = np.random.randint(0, canvas.width), np.random.randint(0, canvas.height)
+                x2, y2 = np.random.randint(0, canvas.width), np.random.randint(0, canvas.height)
+                draw.line([(x1, y1), (x2, y2)], fill=(180, 180, 180), width=2)
+            canvas.paste(img, (40, 40))
+            out = f"{base}_complex_bg.png"
+            canvas.save(os.path.join(OUTPUT_DIR, out))
+            count += 1
+            print(f"  [{count}] {out}")
+
     # --- Mixed barcode + QR ---
     print("--- Mixed types ---")
     for combo_i in range(3):
