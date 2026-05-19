@@ -365,17 +365,48 @@ function grayscaleEnhance(imageData) {
     return { data: out, width: imageData.width, height: imageData.height };
 }
 
-function scanQrIterative(pixelData, w, h, jsqrOpts, label, maxIter) {
+// Crash-safe jsQR wrapper — never use 'attemptBoth' because it crashes
+// on white-border images (inverted all-white → all-black → jsQR binarizer fails).
+function safeJsQR(data, w, h, opts) {
+    // Only use 'dontInvert' — any inversion we need is done manually
+    try { return jsQR(data, w, h, { inversionAttempts: 'dontInvert' }); }
+    catch { return null; }
+}
+
+function scanQrIterative(pixelData, w, h, label, maxIter) {
     const out = [];
     const data = new Uint8ClampedArray(pixelData);
     while (maxIter-- > 0) {
-        let qrCode;
-        try { qrCode = jsQR(data, w, h, jsqrOpts); } catch { break; }
+        const qrCode = safeJsQR(data, w, h, { inversionAttempts: 'dontInvert' });
         if (!qrCode || !qrCode.data) break;
         out.push({ text: qrCode.data, type: 'QR Code', confidence: label });
         blankRegion(data, w, h, qrCode.location);
     }
     return out;
+}
+
+// Scan regions of the image independently (fallback for when full-image scan gives 0)
+async function scanRegions(canvas, w, h) {
+    const results = [];
+    // Split into 2x2 grid and scan each quadrant
+    const cols = 2;
+    const rows = 2;
+    const rw = Math.floor(w / cols);
+    const rh = Math.floor(h / rows);
+    for (let i = 0; i < (cols * rows); i++) {
+        const cx = (i % cols) * rw;
+        const cy = Math.floor(i / cols) * rh;
+        const rc = document.createElement('canvas');
+        rc.width = rw; rc.height = rh;
+        const rctx = rc.getContext('2d');
+        rctx.drawImage(canvas, cx, cy, rw, rh, 0, 0, rw, rh);
+        const idata = rctx.getImageData(0, 0, rw, rh);
+        const enhanced = grayscaleEnhance(idata);
+        for (const r of scanQrIterative(enhanced.data, rw, rh, 'jsQR(reg)', 5)) {
+            if (!results.some(m => m.text === r.text)) results.push(r);
+        }
+    }
+    return results;
 }
 
 async function decodeImageFile(file, scanFormat) {
@@ -392,7 +423,7 @@ async function decodeImageFile(file, scanFormat) {
     const wantBarcode = scanFormat === 'all' || scanFormat === 'barcode';
     const merged = [];
 
-    // ---- BarcodeDetector (try-direct first, validate-on-failure) ----
+    // ====== BarcodeDetector: try-direct, retry-validated ======
     if ((wantQr || wantBarcode) && 'BarcodeDetector' in window) {
         let detected = [];
         try {
@@ -404,7 +435,6 @@ async function decodeImageFile(file, scanFormat) {
             const bd = new BarcodeDetector({ formats: formats });
             detected = await bd.detect(canvas);
         } catch (e1) {
-            console.warn('BarcodeDetector direct failed, retrying validated:', e1.message);
             try {
                 const supported = await BarcodeDetector.getSupportedFormats();
                 const formats = [];
@@ -418,9 +448,7 @@ async function decodeImageFile(file, scanFormat) {
                     const bd = new BarcodeDetector({ formats: formats });
                     detected = await bd.detect(canvas);
                 }
-            } catch (e2) {
-                console.warn('BarcodeDetector validated also failed:', e2.message);
-            }
+            } catch (e2) { /* both failed, fall through */ }
         }
         for (const b of detected) {
             const isQr = b.format === 'qr_code' || b.format === 'QR Code';
@@ -429,21 +457,32 @@ async function decodeImageFile(file, scanFormat) {
         }
     }
 
-    // ---- jsQR multi-pass iterative scanning ----
+    // ====== jsQR crusafe passes (no attemptBoth — we handle inversion manually) ======
     if (wantQr) {
         const enhanced = grayscaleEnhance(imageData);
 
-        insertUnique(merged, scanQrIterative(
-            enhanced.data, w, h, { inversionAttempts: 'dontInvert' }, 'jsQR ✓', 25));
+        // Normal enhanced
+        insertUnique(merged, scanQrIterative(enhanced.data, w, h, 'jsQR ✓', 25));
 
-        insertUnique(merged, scanQrIterative(
-            imageData.data, w, h, { inversionAttempts: 'attemptBoth' }, 'jsQR (raw)', 25));
+        // Raw colour
+        insertUnique(merged, scanQrIterative(imageData.data, w, h, 'jsQR (raw)', 25));
 
-        insertUnique(merged, scanQrIterative(
-            inverted(enhanced.data), w, h, { inversionAttempts: 'dontInvert' }, 'jsQR (inv)', 15));
+        // Inverted enhanced
+        insertUnique(merged, scanQrIterative(inverted(enhanced.data), w, h, 'jsQR (inv)', 15));
+
+        // Inverted raw
+        insertUnique(merged, scanQrIterative(inverted(imageData.data), w, h, 'jsQR (raw inv)', 15));
     }
 
-    // ---- html5-qrcode: always supplement for QR (robust zxing WASM decoder) ----
+    // ====== Region-based fallback for sparse/large images ======
+    if (wantQr && merged.length === 0) {
+        try {
+            const regionResults = await scanRegions(canvas, w, h);
+            insertUnique(merged, regionResults);
+        } catch (e) { /* region scan failed, continue */ }
+    }
+
+    // ====== html5-qrcode: robust zxing WASM supplement ======
     if (wantQr) {
         try {
             const tempId = 'temp-scan-' + Date.now();
@@ -461,9 +500,7 @@ async function decodeImageFile(file, scanFormat) {
                 try { await scanner.clear(); } catch {}
                 div.remove();
             }
-        } catch (e) {
-            console.warn('html5-qrcode supplement:', e.message);
-        }
+        } catch (e) { /* html5-qrcode failed */ }
     }
 
     return merged;
