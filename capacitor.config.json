@@ -1,0 +1,12 @@
+{
+  "appId": "io.github.whx12210512.scanner",
+  "appName": "扫码识别",
+  "webDir": "www",
+  "server": {
+    "url": "https://clever-torrone-2cb8c8.netlify.app",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}

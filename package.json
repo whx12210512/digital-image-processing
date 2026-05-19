@@ -1,0 +1,27 @@
+{
+  "name": "digital-image-processing",
+  "version": "1.0.0",
+  "description": "数字图像处理课程大作业 · 任务四 · 南方科技大学 电子与电气工程系 · 2026",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whx12210512/digital-image-processing.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/whx12210512/digital-image-processing/issues"
+  },
+  "homepage": "https://github.com/whx12210512/digital-image-processing#readme",
+  "dependencies": {
+    "@capacitor/android": "^8.3.4"
+  }
+}
