@@ -1,0 +1,18 @@
+{
+  "name": "条码/二维码扫描器",
+  "short_name": "扫码识别",
+  "description": "数字图像处理课程大作业 - 条形码/二维码识别",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#1a73e8",
+  "background_color": "#ffffff",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='12' y='12' width='76' height='76' rx='16' fill='none' stroke='%231a73e8' stroke-width='6'/><rect x='26' y='26' width='48' height='48' rx='6' fill='none' stroke='%231a73e8' stroke-width='3.5'/><line x1='36' y1='42' x2='64' y2='42' stroke='%231a73e8' stroke-width='3'/><line x1='36' y1='52' x2='64' y2='52' stroke='%231a73e8' stroke-width='3'/><line x1='36' y1='62' x2='64' y2='62' stroke='%231a73e8' stroke-width='3'/></svg>",
+      "sizes": "100x100",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
