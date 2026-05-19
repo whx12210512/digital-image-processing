@@ -2,6 +2,7 @@
   "name": "条码/二维码扫描器",
   "short_name": "扫码识别",
   "description": "数字图像处理课程大作业 - 条形码/二维码识别",
+  "version": "1.0.1",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
