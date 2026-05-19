@@ -52,12 +52,50 @@
 ## 快速开始
 
 ### Web 扫描应用
-直接用手机浏览器打开 `code/scanner-app/index.html`，或部署到静态服务器：
+
+> **重要**: 浏览器摄像头 API (`getUserMedia`) 仅限**安全上下文**（HTTPS 或 localhost）。
+> 手机通过局域网 IP 访问必须使用 HTTPS，否则会提示"权限不足"。
+
+#### 方式一：HTTPS 本地服务器（推荐，手机/电脑均可）
+
+```bash
+cd code/scanner-app
+
+# 1. 生成自签名证书（仅首次）
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+  -days 365 -nodes -subj "//CN=<你的IP地址>"
+
+# 2. 启动 HTTPS 服务器
+python server_https.py
+```
+
+电脑浏览器访问 `https://localhost:8443`，手机访问 `https://<电脑IP>:8443`。
+
+首次访问时浏览器会提示证书不受信任，点击"高级 → 继续访问"即可。
+
+> Windows 用户需额外放行防火墙端口:
+> ```bash
+> netsh advfirewall firewall add rule name="Scanner HTTPS 8443" dir=in action=allow protocol=TCP localport=8443
+> ```
+
+#### 方式二：HTTP 本地调试（仅电脑浏览器）
+
 ```bash
 cd code/scanner-app
 python -m http.server 8000
-# 手机访问: http://<电脑IP>:8000
+# 浏览器打开 http://localhost:8000
 ```
+
+> `localhost` 被视为安全上下文，摄像头可正常使用。但手机通过 IP 访问 `http://<IP>:8000` 会因非 HTTPS 而无法调用摄像头。
+
+#### 方式三：GitHub Pages（公网访问，自动 HTTPS）
+
+推送到 GitHub 后在仓库 Settings → Pages 中启用，选择 `main` 分支根目录。
+需将 `code/scanner-app/` 中的文件移至仓库根目录或配置部署目录。
+
+#### 方式四：直接打开文件（不支持摄像头）
+
+双击 `code/scanner-app/index.html` 在浏览器中打开，可使用**图片上传识别**功能，但无法使用摄像头扫码。
 
 ### Python Pipeline
 ```bash
