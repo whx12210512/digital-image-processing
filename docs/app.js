@@ -311,6 +311,27 @@ function loadImage(file) {
     });
 }
 
+function blankRegion(data, w, h, location) {
+    const margin = 10;
+    const minX = Math.max(0, Math.floor(Math.min(
+        location.topLeftCorner.x, location.bottomLeftCorner.x)) - margin);
+    const minY = Math.max(0, Math.floor(Math.min(
+        location.topLeftCorner.y, location.topRightCorner.y)) - margin);
+    const maxX = Math.min(w, Math.ceil(Math.max(
+        location.topRightCorner.x, location.bottomRightCorner.x)) + margin);
+    const maxY = Math.min(h, Math.ceil(Math.max(
+        location.bottomLeftCorner.y, location.bottomRightCorner.y)) + margin);
+    for (let y = minY; y < maxY; y++) {
+        for (let x = minX; x < maxX; x++) {
+            const idx = (y * w + x) * 4;
+            data[idx] = 255;
+            data[idx + 1] = 255;
+            data[idx + 2] = 255;
+            data[idx + 3] = 255;
+        }
+    }
+}
+
 async function decodeImageFile(file, scanFormat) {
     const img = await loadImage(file);
     const canvas = document.createElement('canvas');
@@ -322,51 +343,68 @@ async function decodeImageFile(file, scanFormat) {
     const results = [];
     const w = imageData.width;
     const h = imageData.height;
+    const wantQr = scanFormat === 'all' || scanFormat === 'qr';
+    const wantBarcode = scanFormat === 'all' || scanFormat === 'barcode';
 
-    // 1) QR codes via jsQR — iterative: detect, blank, re-detect
-    if (scanFormat === 'all' || scanFormat === 'qr') {
+    // 1) BarcodeDetector (native, multi-target, robust) — covers QR + barcodes
+    if ((wantQr || wantBarcode) && 'BarcodeDetector' in window) {
+        try {
+            const formats = [];
+            if (wantQr) formats.push('qr_code');
+            if (wantBarcode) {
+                formats.push('ean_13', 'ean_8', 'upc_a', 'upc_e',
+                    'code_128', 'code_39', 'code_93', 'codabar', 'itf');
+            }
+            const bd = new BarcodeDetector({ formats });
+            const detected = await bd.detect(canvas);
+            for (const b of detected) {
+                const type = b.format === 'qr_code' ? 'QR Code' : 'Barcode';
+                results.push({ text: b.rawValue, type, confidence: 'BarcodeDetector ✓' });
+            }
+        } catch {}
+    }
+
+    // 2) jsQR iterative — supplement when BarcodeDetector unavailable / found nothing
+    if (wantQr && results.length === 0) {
         const qrData = new Uint8ClampedArray(imageData.data);
         let maxIter = 20;
         while (maxIter-- > 0) {
             let qrCode;
             try {
-                qrCode = jsQR(qrData, w, h, { inversionAttempts: 'dontInvert' });
+                qrCode = jsQR(qrData, w, h, { inversionAttempts: 'attemptBoth' });
             } catch { break; }
             if (!qrCode || !qrCode.data) break;
 
-            results.push({ text: qrCode.data, type: 'QR Code', confidence: 'jsQR ✓' });
-
-            const loc = qrCode.location;
-            const minX = Math.max(0, Math.floor(Math.min(loc.topLeftCorner.x, loc.bottomLeftCorner.x)) - 5);
-            const minY = Math.max(0, Math.floor(Math.min(loc.topLeftCorner.y, loc.topRightCorner.y)) - 5);
-            const maxX = Math.min(w, Math.ceil(Math.max(loc.topRightCorner.x, loc.bottomRightCorner.x)) + 5);
-            const maxY = Math.min(h, Math.ceil(Math.max(loc.bottomLeftCorner.y, loc.bottomRightCorner.y)) + 5);
-            for (let y = minY; y < maxY; y++) {
-                for (let x = minX; x < maxX; x++) {
-                    const idx = (y * w + x) * 4;
-                    qrData[idx] = 255;
-                    qrData[idx + 1] = 255;
-                    qrData[idx + 2] = 255;
-                    qrData[idx + 3] = 255;
-                }
+            if (!results.some(r => r.text === qrCode.data)) {
+                results.push({ text: qrCode.data, type: 'QR Code', confidence: 'jsQR ✓' });
             }
+            blankRegion(qrData, w, h, qrCode.location);
         }
     }
 
-    // 2) Barcodes via BarcodeDetector API (Chrome)
-    if ((scanFormat === 'all' || scanFormat === 'barcode') && 'BarcodeDetector' in window) {
-        try {
-            const bd = new BarcodeDetector({
-                formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'code_93', 'codabar', 'itf'],
-            });
-            const barcodes = await bd.detect(canvas);
-            for (const b of barcodes) {
-                results.push({ text: b.rawValue, type: 'Barcode', confidence: 'BarcodeDetector ✓' });
+    // 3) Manual inversion retry — for stubborn inverted/low-contrast QR codes
+    if (results.length === 0 && wantQr) {
+        const invData = new Uint8ClampedArray(imageData.data);
+        for (let i = 0; i < invData.length; i += 4) {
+            invData[i] = 255 - invData[i];
+            invData[i + 1] = 255 - invData[i + 1];
+            invData[i + 2] = 255 - invData[i + 2];
+        }
+        let maxIter = 10;
+        while (maxIter-- > 0) {
+            let qrCode;
+            try {
+                qrCode = jsQR(invData, w, h, { inversionAttempts: 'dontInvert' });
+            } catch { break; }
+            if (!qrCode || !qrCode.data) break;
+            if (!results.some(r => r.text === qrCode.data)) {
+                results.push({ text: qrCode.data, type: 'QR Code', confidence: 'jsQR (inverted)' });
             }
-        } catch {}
+            blankRegion(invData, w, h, qrCode.location);
+        }
     }
 
-    // 3) Fallback: html5-qrcode (only if no results yet)
+    // 4) Fallback: html5-qrcode (hybrid decoder, last resort)
     if (results.length === 0) {
         try {
             const tempId = 'temp-scan-' + Date.now();
