@@ -88,12 +88,33 @@ python -m http.server 8000
 
 > `localhost` 被视为安全上下文，摄像头可正常使用。但手机通过 IP 访问 `http://<IP>:8000` 会因非 HTTPS 而无法调用摄像头。
 
-#### 方式三：GitHub Pages（公网访问，自动 HTTPS）
+#### 方式三：PWA / Netlify 在线版（推荐，手机/电脑均可，无需安装）
 
-推送到 GitHub 后在仓库 Settings → Pages 中启用，选择 `main` 分支根目录。
-需将 `code/scanner-app/` 中的文件移至仓库根目录或配置部署目录。
+直接浏览器打开即用，支持 PWA 添加到桌面：
 
-#### 方式四：直接打开文件（不支持摄像头）
+```
+https://clever-torrone-2cb8c8.netlify.app
+```
+
+Chrome/Edge 打开后 → 菜单 → **"添加到主屏幕"** → 桌面出现独立 App 图标，全屏运行。
+
+#### 方式四：Android APK（荣耀/小米等无 Google 服务的手机）
+
+下载安装 APK，内置 WebView 加载扫码页面，不依赖 Google Play Services：
+
+```
+https://clever-torrone-2cb8c8.netlify.app/scanner.apk
+```
+
+> 自行构建 APK:
+> ```bash
+> npm install                      # 仅首次
+> npx cap sync android             # 同步 web 资源
+> cd android && ./gradlew assembleDebug
+> # APK 输出: android/app/build/outputs/apk/debug/app-debug.apk
+> ```
+
+#### 方式五：直接打开文件（不支持摄像头）
 
 双击 `code/scanner-app/index.html` 在浏览器中打开，可使用**图片上传识别**功能，但无法使用摄像头扫码。
 
