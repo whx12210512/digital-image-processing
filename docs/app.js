@@ -12,6 +12,7 @@ const state = {
     facingMode: 'environment',
     soundEnabled: true,
     autoRedirect: true,
+    cameraResults: [],
     history: [],
     currentResult: null,
 };
@@ -153,6 +154,7 @@ async function startScan() {
             config.qrbox = { width: 300, height: 150 };
         }
 
+        state.cameraResults = [];
         state.scanner = new Html5Qrcode('reader');
         state.isScanning = true;
 
@@ -190,18 +192,23 @@ function onScanSuccess(decodedText, decodedResult) {
     const formatName = decodedResult.result.format?.formatName || 'unknown';
     const type = formatName === 'qr_code' ? 'QR Code' : 'Barcode';
 
-    // Play beep
+    // Skip duplicates during this scan session
+    if (state.cameraResults.some(r => r.text === decodedText)) return;
+
     if (state.soundEnabled) playBeep();
 
-    // Show result
-    displayResult(decodedText, type, 'resultCard', 'resultType', 'resultContent', 'resultConfidence');
-
+    state.cameraResults.push({ text: decodedText, type: type });
     addToHistory(decodedText, type);
-    stopScan();
 
-    if (state.autoRedirect && isUrl(decodedText)) {
-        showToast('检测到链接，即将跳转...');
-        setTimeout(() => window.open(decodedText, '_blank'), 1200);
+    const card = document.getElementById('resultCard');
+    card.style.display = 'block';
+
+    if (state.cameraResults.length === 1) {
+        displayResult(decodedText, type, 'resultCard', 'resultType', 'resultContent', 'resultConfidence');
+        showToast('扫描到 1 个, 继续扫描中...');
+    } else {
+        card.innerHTML = buildMultiResultHtml(state.cameraResults);
+        showToast(`扫描到 ${state.cameraResults.length} 个结果`);
     }
 }
 
@@ -219,6 +226,12 @@ async function stopScan() {
         }
         state.isScanning = false;
     }
+
+    if (state.cameraResults.length === 1 && state.autoRedirect && isUrl(state.cameraResults[0].text)) {
+        showToast('检测到链接，即将跳转...');
+        setTimeout(() => window.open(state.cameraResults[0].text, '_blank'), 1200);
+    }
+
     resetScanUI();
 }
 
@@ -364,8 +377,8 @@ async function decodeImageFile(file, scanFormat) {
         } catch {}
     }
 
-    // 2) jsQR iterative — supplement when BarcodeDetector unavailable / found nothing
-    if (wantQr && results.length === 0) {
+    // 2) jsQR iterative — always run to catch what BarcodeDetector missed
+    if (wantQr) {
         const qrData = new Uint8ClampedArray(imageData.data);
         let maxIter = 20;
         while (maxIter-- > 0) {
@@ -382,8 +395,8 @@ async function decodeImageFile(file, scanFormat) {
         }
     }
 
-    // 3) Manual inversion retry — for stubborn inverted/low-contrast QR codes
-    if (results.length === 0 && wantQr) {
+    // 3) Manual inversion retry — catch inverted/low-contrast QR codes
+    if (wantQr) {
         const invData = new Uint8ClampedArray(imageData.data);
         for (let i = 0; i < invData.length; i += 4) {
             invData[i] = 255 - invData[i];
