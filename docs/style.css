@@ -259,6 +259,23 @@ html, body {
     display: flex; gap: 8px; margin-top: 12px;
 }
 
+/* Multi-Result Items */
+.multi-result-item {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+.multi-result-item:last-of-type {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+.mri-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+}
+.mri-index {
+    font-size: 11px; color: var(--text-secondary);
+    margin-left: auto;
+}
+
 /* === Gallery Tab === */
 .gallery-header {
     padding: 16px 16px 8px;

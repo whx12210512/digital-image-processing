@@ -11,6 +11,7 @@ const state = {
     scanFormat: 'all',       // 'all' | 'qr' | 'barcode'
     facingMode: 'environment',
     soundEnabled: true,
+    autoRedirect: true,
     history: [],
     currentResult: null,
 };
@@ -195,11 +196,13 @@ function onScanSuccess(decodedText, decodedResult) {
     // Show result
     displayResult(decodedText, type, 'resultCard', 'resultType', 'resultContent', 'resultConfidence');
 
-    // Save to history
     addToHistory(decodedText, type);
-
-    // Brief pause to show result, then resume
     stopScan();
+
+    if (state.autoRedirect && isUrl(decodedText)) {
+        showToast('检测到链接，即将跳转...');
+        setTimeout(() => window.open(decodedText, '_blank'), 1200);
+    }
 }
 
 function onScanFailure(error) {
@@ -231,43 +234,67 @@ async function scanImageFile(file, cardId, typeId, contentId, confidenceId, isGa
     showToast('正在识别...');
 
     try {
-        const result = await decodeImageFile(file, state.scanFormat);
+        const results = await decodeImageFile(file, state.scanFormat);
 
-         if (result) {
-            const card = document.getElementById(cardId);
-            card.style.display = 'block';
-
-            if (isGallery) {
-                card.innerHTML = `
-                    <div class="result-header">
-                        <span class="badge ${result.type === 'QR Code' ? '' : 'barcode'}">${result.type}</span>
-                        <span class="confidence">${result.confidence || ''}</span>
-                        <button onclick="this.parentElement.parentElement.style.display='none'" class="icon-btn-sm">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                        </button>
-                    </div>
-                    <div class="result-content" style="font-size:16px;font-family:monospace;">${escapeHtml(result.text)}</div>
-                    <div class="result-actions">
-                        <button onclick="navigator.clipboard.writeText('${escapeHtml(result.text).replace(/'/g, "\\'")}');showToast('已复制')" class="btn-sm">复制</button>
-                        ${isUrl(result.text) ? `<button onclick="window.open('${escapeHtml(result.text)}','_blank')" class="btn-sm">打开链接</button>` : ''}
-                    </div>
-                `;
-            } else {
-                document.getElementById(typeId).textContent = result.type;
-                document.getElementById(typeId).className = 'badge ' + (result.type === 'QR Code' ? '' : 'barcode');
-                document.getElementById(contentId).textContent = result.text;
-                document.getElementById(confidenceId).textContent = result.confidence || '';
-                document.getElementById('btnOpenUrl').style.display = isUrl(result.text) ? 'flex' : 'none';
-             }
-            addToHistory(result.text, result.type);
-            if (state.soundEnabled) playBeep();
-        } else {
+        if (results.length === 0) {
             showToast('未识别到条码/二维码');
+            return;
+        }
+
+        const card = document.getElementById(cardId);
+        card.style.display = 'block';
+
+        if (isGallery) {
+            card.innerHTML = buildMultiResultHtml(results);
+        } else if (results.length === 1) {
+            const r = results[0];
+            document.getElementById(typeId).textContent = r.type;
+            document.getElementById(typeId).className = 'badge ' + (r.type === 'QR Code' ? '' : 'barcode');
+            document.getElementById(contentId).textContent = r.text;
+            document.getElementById(confidenceId).textContent = r.confidence || '';
+            document.getElementById('btnOpenUrl').style.display = isUrl(r.text) ? 'flex' : 'none';
+            state.currentResult = r.text;
+        } else {
+            card.innerHTML = buildMultiResultHtml(results);
+        }
+
+        for (const r of results) {
+            addToHistory(r.text, r.type);
+        }
+        if (state.soundEnabled) playBeep();
+
+        if (results.length === 1 && state.autoRedirect && !isGallery && isUrl(results[0].text)) {
+            showToast('检测到链接，即将跳转...');
+            setTimeout(() => window.open(results[0].text, '_blank'), 1200);
         }
     } catch (err) {
         console.error('Image scan error:', err);
         showToast('识别失败: ' + err.message);
     }
+}
+
+function buildMultiResultHtml(results) {
+    return `
+        <div class="result-header">
+            <span class="badge" style="background:#1a73e8;">${results.length} 个结果</span>
+            <button onclick="this.parentElement.parentElement.style.display='none'" class="icon-btn-sm">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+        ${results.map((r, i) => `
+            <div class="multi-result-item">
+                <div class="mri-header">
+                    <span class="badge ${r.type === 'QR Code' ? '' : 'barcode'}">${r.type}</span>
+                    <span class="mri-index">#${i + 1}</span>
+                </div>
+                <div class="result-content" style="font-size:15px;font-family:monospace;">${escapeHtml(r.text)}</div>
+                <div class="result-actions">
+                    <button onclick="event.stopPropagation();navigator.clipboard.writeText('${escapeHtml(r.text).replace(/'/g, "\\'")}');showToast('已复制')" class="btn-sm">复制</button>
+                    ${isUrl(r.text) ? `<button onclick="event.stopPropagation();window.open('${escapeHtml(r.text)}','_blank')" class="btn-sm">打开链接</button>` : ''}
+                </div>
+            </div>
+        `).join('')}
+    `;
 }
 
 function loadImage(file) {
@@ -292,52 +319,81 @@ async function decodeImageFile(file, scanFormat) {
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, 0, 0);
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const results = [];
+    const w = imageData.width;
+    const h = imageData.height;
 
-    // 1) Try QR via jsQR
+    // 1) QR codes via jsQR — iterative: detect, blank, re-detect
     if (scanFormat === 'all' || scanFormat === 'qr') {
-        try {
-            const qrCode = jsQR(imageData.data, imageData.width, imageData.height, {
-                inversionAttempts: 'dontInvert',
-            });
-            if (qrCode && qrCode.data) {
-                return { text: qrCode.data, type: 'QR Code', confidence: 'jsQR ✓' };
+        const qrData = new Uint8ClampedArray(imageData.data);
+        let maxIter = 20;
+        while (maxIter-- > 0) {
+            let qrCode;
+            try {
+                qrCode = jsQR(qrData, w, h, { inversionAttempts: 'dontInvert' });
+            } catch { break; }
+            if (!qrCode || !qrCode.data) break;
+
+            results.push({ text: qrCode.data, type: 'QR Code', confidence: 'jsQR ✓' });
+
+            const loc = qrCode.location;
+            const minX = Math.max(0, Math.floor(Math.min(loc.topLeftCorner.x, loc.bottomLeftCorner.x)) - 5);
+            const minY = Math.max(0, Math.floor(Math.min(loc.topLeftCorner.y, loc.topRightCorner.y)) - 5);
+            const maxX = Math.min(w, Math.ceil(Math.max(loc.topRightCorner.x, loc.bottomRightCorner.x)) + 5);
+            const maxY = Math.min(h, Math.ceil(Math.max(loc.bottomLeftCorner.y, loc.bottomRightCorner.y)) + 5);
+            for (let y = minY; y < maxY; y++) {
+                for (let x = minX; x < maxX; x++) {
+                    const idx = (y * w + x) * 4;
+                    qrData[idx] = 255;
+                    qrData[idx + 1] = 255;
+                    qrData[idx + 2] = 255;
+                    qrData[idx + 3] = 255;
+                }
             }
-        } catch {}
+        }
     }
 
-    // 2) Try barcode via BarcodeDetector API (Chrome)
+    // 2) Barcodes via BarcodeDetector API (Chrome)
     if ((scanFormat === 'all' || scanFormat === 'barcode') && 'BarcodeDetector' in window) {
         try {
             const bd = new BarcodeDetector({
                 formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'code_93', 'codabar', 'itf'],
             });
             const barcodes = await bd.detect(canvas);
-            if (barcodes.length > 0) {
-                return { text: barcodes[0].rawValue, type: 'Barcode', confidence: 'BarcodeDetector ✓' };
+            for (const b of barcodes) {
+                results.push({ text: b.rawValue, type: 'Barcode', confidence: 'BarcodeDetector ✓' });
             }
         } catch {}
     }
 
-    // 3) Try html5-qrcode file scan as fallback
-    try {
-        const tempId = 'temp-scan-' + Date.now();
-        const div = document.createElement('div');
-        div.id = tempId;
-        div.style.display = 'none';
-        document.body.appendChild(div);
-        const fs = new Html5Qrcode(tempId);
+    // 3) Fallback: html5-qrcode (only if no results yet)
+    if (results.length === 0) {
         try {
-            const result = await fs.scanFile(file, false);
-            if (result && typeof result === 'string' && result.trim()) {
-                return { text: result, type: 'Detected', confidence: 'html5-qrcode' };
+            const tempId = 'temp-scan-' + Date.now();
+            const div = document.createElement('div');
+            div.id = tempId;
+            div.style.display = 'none';
+            document.body.appendChild(div);
+            const fs = new Html5Qrcode(tempId);
+            try {
+                const result = await fs.scanFile(file, false);
+                if (result && typeof result === 'string' && result.trim()) {
+                    results.push({ text: result, type: 'Detected', confidence: 'html5-qrcode' });
+                }
+            } finally {
+                try { await fs.clear(); } catch {}
+                div.remove();
             }
-        } finally {
-            try { await fs.clear(); } catch {}
-            div.remove();
-        }
-    } catch {}
+        } catch {}
+    }
 
-    return null;
+    // Deduplicate
+    const seen = new Set();
+    return results.filter(r => {
+        if (seen.has(r.text)) return false;
+        seen.add(r.text);
+        return true;
+    });
 }
 
 // ============ Result Display ============
@@ -459,12 +515,21 @@ function setupSettings() {
     document.getElementById('soundToggle').addEventListener('change', (e) => {
         state.soundEnabled = e.target.checked;
     });
+    document.getElementById('autoRedirectToggle').addEventListener('change', (e) => {
+        state.autoRedirect = e.target.checked;
+        localStorage.setItem('auto_redirect', e.target.checked);
+    });
 
     // Load saved
     const savedFormat = localStorage.getItem('scan_format');
     if (savedFormat) {
         state.scanFormat = savedFormat;
         document.getElementById('scanFormat').value = savedFormat;
+    }
+    const savedAutoRedirect = localStorage.getItem('auto_redirect');
+    if (savedAutoRedirect !== null) {
+        state.autoRedirect = savedAutoRedirect === 'true';
+        document.getElementById('autoRedirectToggle').checked = state.autoRedirect;
     }
 }
 
@@ -478,7 +543,7 @@ function closeSettings() {
 
 // ============ Utility Functions ============
 function isUrl(text) {
-    return /^https?:\/\/.+/.test(text);
+    return /^(https?:\/\/|www\.)/i.test(text);
 }
 
 function escapeHtml(str) {
