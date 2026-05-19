@@ -392,71 +392,78 @@ async function decodeImageFile(file, scanFormat) {
     const wantBarcode = scanFormat === 'all' || scanFormat === 'barcode';
     const merged = [];
 
-    // ---- BarcodeDetector (native multi-target) ----
+    // ---- BarcodeDetector (try-direct first, validate-on-failure) ----
     if ((wantQr || wantBarcode) && 'BarcodeDetector' in window) {
+        let detected = [];
         try {
-            const supported = await BarcodeDetector.getSupportedFormats();
             const formats = [];
-            if (wantQr && supported.includes('qr_code')) formats.push('qr_code');
+            if (wantQr) formats.push('qr_code');
             if (wantBarcode) {
-                for (const f of ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']) {
-                    if (supported.includes(f)) formats.push(f);
-                }
+                formats.push('ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf');
             }
-            if (formats.length > 0) {
-                const bd = new BarcodeDetector({ formats });
-                const detected = await bd.detect(canvas);
-                for (const b of detected) {
-                    const type = b.format === 'qr_code' ? 'QR Code' : 'Barcode';
-                    merged.push({ text: b.rawValue, type, confidence: 'BarcodeDetector ✓' });
+            const bd = new BarcodeDetector({ formats: formats });
+            detected = await bd.detect(canvas);
+        } catch (e1) {
+            console.warn('BarcodeDetector direct failed, retrying validated:', e1.message);
+            try {
+                const supported = await BarcodeDetector.getSupportedFormats();
+                const formats = [];
+                if (wantQr && supported.includes('qr_code')) formats.push('qr_code');
+                if (wantBarcode) {
+                    for (const f of ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']) {
+                        if (supported.includes(f)) formats.push(f);
+                    }
                 }
+                if (formats.length > 0) {
+                    const bd = new BarcodeDetector({ formats: formats });
+                    detected = await bd.detect(canvas);
+                }
+            } catch (e2) {
+                console.warn('BarcodeDetector validated also failed:', e2.message);
             }
-        } catch (e) {
-            console.warn('BarcodeDetector error:', e);
+        }
+        for (const b of detected) {
+            const isQr = b.format === 'qr_code' || b.format === 'QR Code';
+            merged.push({ text: b.rawValue, type: isQr ? 'QR Code' : 'Barcode',
+                          confidence: 'BarcodeDetector ✓' });
         }
     }
 
-    // ---- jsQR iterative passes (on original + enhanced + inverted data) ----
+    // ---- jsQR multi-pass iterative scanning ----
     if (wantQr) {
         const enhanced = grayscaleEnhance(imageData);
 
-        const passes = [
-            { pixelData: enhanced.data,     opts: { inversionAttempts: 'dontInvert' }, label: 'jsQR ✓',       maxIter: 20 },
-            { pixelData: imageData.data,    opts: { inversionAttempts: 'attemptBoth' }, label: 'jsQR (raw)',    maxIter: 20 },
-            { pixelData: inverted(enhanced.data), opts: { inversionAttempts: 'dontInvert' }, label: 'jsQR (inv)',   maxIter: 10 },
-            { pixelData: inverted(imageData.data), opts: { inversionAttempts: 'dontInvert' }, label: 'jsQR (raw inv)', maxIter: 10 },
-        ];
+        insertUnique(merged, scanQrIterative(
+            enhanced.data, w, h, { inversionAttempts: 'dontInvert' }, 'jsQR ✓', 25));
 
-        for (const pass of passes) {
-            for (const r of scanQrIterative(pass.pixelData, w, h, pass.opts, pass.label, pass.maxIter)) {
-                if (!merged.some(m => m.text === r.text)) {
-                    merged.push(r);
-                }
-            }
-        }
+        insertUnique(merged, scanQrIterative(
+            imageData.data, w, h, { inversionAttempts: 'attemptBoth' }, 'jsQR (raw)', 25));
+
+        insertUnique(merged, scanQrIterative(
+            inverted(enhanced.data), w, h, { inversionAttempts: 'dontInvert' }, 'jsQR (inv)', 15));
     }
 
-    // ---- html5-qrcode supplement ----
-    if (merged.length === 0) {
+    // ---- html5-qrcode: always supplement for QR (robust zxing WASM decoder) ----
+    if (wantQr) {
         try {
             const tempId = 'temp-scan-' + Date.now();
             const div = document.createElement('div');
             div.id = tempId;
             div.style.display = 'none';
             document.body.appendChild(div);
-            const fs = new Html5Qrcode(tempId);
+            const scanner = new Html5Qrcode(tempId);
             try {
-                const result = await fs.scanFile(file, false);
+                const result = await scanner.scanFile(file, false);
                 if (result && typeof result === 'string' && result.trim()) {
-                    if (!merged.some(r => r.text === result)) {
-                        merged.push({ text: result, type: 'Detected', confidence: 'html5-qrcode' });
-                    }
+                    insertUnique(merged, [{ text: result, type: 'QR Code', confidence: 'html5-qrcode' }]);
                 }
             } finally {
-                try { await fs.clear(); } catch {}
+                try { await scanner.clear(); } catch {}
                 div.remove();
             }
-        } catch {}
+        } catch (e) {
+            console.warn('html5-qrcode supplement:', e.message);
+        }
     }
 
     return merged;
@@ -471,6 +478,14 @@ function inverted(data) {
         out[i + 3] = data[i + 3];
     }
     return out;
+}
+
+function insertUnique(dest, items) {
+    for (const r of items) {
+        if (!dest.some(m => m.text === r.text)) {
+            dest.push(r);
+        }
+    }
 }
 
 // ============ Result Display ============
