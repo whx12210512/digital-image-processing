@@ -216,8 +216,21 @@
         <div id="toast" class="toast" style="display:none;"></div>
     </div>
 
-    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <script>
+      // Always hide splash after timeout, even if CDN scripts fail
+      window.addEventListener('DOMContentLoaded', function() {
+        setTimeout(function() {
+          var splash = document.getElementById('splash');
+          var app = document.getElementById('app');
+          if (splash) splash.classList.add('hide');
+          if (app) app.style.display = 'flex';
+        }, 1500);
+      });
+    </script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"
+            onerror="console.warn('html5-qrcode CDN failed')"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"
+            onerror="console.warn('jsQR CDN failed')"></script>
     <script src="app.js"></script>
 </body>
 </html>
