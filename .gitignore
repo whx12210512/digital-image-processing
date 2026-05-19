@@ -41,7 +41,6 @@ android/.gradle/
 android/local.properties
 android/captures/
 *.apk
-!docs/scanner.apk
 
 # Capacitor
 www/
