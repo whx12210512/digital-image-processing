@@ -47,6 +47,56 @@ def run_pipeline(img, adaptive=True, visualize=False):
 
     # Stage 4: Decoding
     results = decode_all(corrected)
+
+    # Stage 5: pyzbar fallback with multi-angle + denoise attempts
+    if not results:
+        try:
+            from pyzbar.pyzbar import decode as pyzbar_decode
+            gray = img if len(img.shape) == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+            def try_pyzbar(image):
+                res = pyzbar_decode(image)
+                if res:
+                    return [{'text': r.data.decode('utf-8', errors='replace'),
+                             'type': r.type, 'confidence': 0.75} for r in res]
+                return []
+
+            # Try original gray
+            results = try_pyzbar(gray)
+
+            # Try with median filter (salt-and-pepper noise removal)
+            if not results:
+                for ks in [3, 5, 7]:
+                    denoised = cv2.medianBlur(gray, ks)
+                    results = try_pyzbar(denoised)
+                    if results:
+                        break
+
+            # Try with bilateral filter (edge-preserving)
+            if not results:
+                bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+                results = try_pyzbar(bilateral)
+
+            # Try morph close to reconnect broken bar patterns
+            if not results:
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
+                closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+                results = try_pyzbar(closed)
+
+            # Try un-rotating for tilted barcodes
+            if not results:
+                h, w = gray.shape[:2]
+                center = (w // 2, h // 2)
+                for angle in [15, -15, 30, -30]:
+                    rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
+                    rotated = cv2.warpAffine(gray, rot_mat, (w, h),
+                                             borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+                    results = try_pyzbar(rotated)
+                    if results:
+                        break
+        except ImportError:
+            pass
+
     t4 = time.time()
 
     elapsed = {

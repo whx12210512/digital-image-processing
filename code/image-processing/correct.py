@@ -282,17 +282,22 @@ def correct_region(img, localization_result):
     # Fallback: correct QR-like regions from coarse detection
     for rect, conf in localization_result.get('qr_rects', []):
         try:
-            # Use the rotated rect to extract a square region
-            src_pts = cv2.boxPoints(rect)
+            # Expand the rotated rect by a margin to handle rotation
+            center, size, angle = rect
+            rw, rh = size
+            # Add 25% margin to ensure full QR code is captured (especially rotated ones)
+            expanded_size = (max(rw, rh) * 1.25, max(rw, rh) * 1.25)
+            expanded_rect = (center, expanded_size, angle)
+            src_pts = cv2.boxPoints(expanded_rect)
             src_pts = order_points(src_pts)
-            size = int(max(rect[1]))
-            corrected_img = four_point_transform(gray, src_pts, (size, size))
+            out_size = int(max(rw, rh) * 1.25)
+            corrected_img = four_point_transform(gray, src_pts, (out_size, out_size))
             if corrected_img is not None and corrected_img.size > 100:
                 results.append({
                     'image': corrected_img,
                     'type': 'qr',
                     'rect': rect,
-                    'confidence': conf * 0.7,  # Lower confidence for coarse
+                    'confidence': conf * 0.7,
                 })
         except Exception:
             continue

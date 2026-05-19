@@ -98,8 +98,15 @@ def morph_erode(img, kernel_size=3, iterations=1):
     return cv2.erode(img, kernel, iterations=iterations)
 
 
-def preprocess(img, adaptive=True, block_size=25, c=8):
+def preprocess(img, adaptive=True, block_size=25, c=8, denoise=True):
     """Run the full preprocessing pipeline.
+
+    Args:
+        img: input image (BGR or grayscale)
+        adaptive: use adaptive thresholding (True) or Otsu (False)
+        block_size: adaptive threshold block size
+        c: adaptive threshold constant
+        denoise: apply median filter for salt-and-pepper noise removal
 
     Returns:
         gray: grayscale image
@@ -107,6 +114,11 @@ def preprocess(img, adaptive=True, block_size=25, c=8):
         enhanced: CLAHE-enhanced image (for edge detection)
     """
     gray = to_grayscale(img)
+
+    # Median filter for salt-and-pepper noise removal
+    if denoise:
+        gray = median_filter(gray, 3)
+
     enhanced = clahe_enhance(gray)
     denoised = gaussian_filter(gray, sigma=1.2)
 
