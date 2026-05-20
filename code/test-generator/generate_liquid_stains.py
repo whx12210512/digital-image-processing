@@ -213,6 +213,120 @@ def generate_blue_ink(index):
 
 
 # ============================================================================
+# Task C: 高频水珠/雨滴折射模拟 (Water Drops Refraction)
+# ============================================================================
+
+def spherical_lens_map(h, w, cx, cy, radius, strength=None):
+    """
+    构造单个水珠的球面透镜坐标映射。
+
+    数学原理:
+        水珠近似为半球形透镜。
+        距中心越近, 折射放大越强。
+        映射函数: r_new = r_old * (1 + strength * (1 - (r_old/radius)²))
+        即: 中心附近像素向外推移 (放大), 边缘像素向内收 (压缩)。
+
+    返回: (map_x, map_y) — 局部坐标映射 (仅对圆内有效)
+    """
+    if strength is None:
+        strength = random.uniform(0.06, 0.18)
+
+    y, x = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx = x - cx
+    dy = y - cy
+    dist = np.sqrt(dx * dx + dy * dy)
+
+    # 归一化距离 [0, 1]
+    norm = dist / max(radius, 1)
+    # 透镜因子: 中心膨胀 > 边缘收缩
+    factor = 1.0 + strength * (1.0 - np.clip(norm, 0, 1) ** 2)
+
+    # 新采样位置: 向外推
+    map_x = np.clip(cx + dx * factor, 0, w - 1)
+    map_y = np.clip(cy + dy * factor, 0, h - 1)
+
+    return map_x, map_y, dist <= radius
+
+
+def apply_water_drops(image, num_drops=None, drop_radius_range=None):
+    """
+    在图像上施加多个水珠折射效果。
+
+    算法:
+        1. 随机生成圆形水珠位置和半径
+        2. 每个水珠内做球面透镜映射 (cv2.remap)
+        3. 水珠区域叠加轻微高斯模糊 (模拟光学散射)
+        4. 水珠边缘叠加暗色圆环 (模拟液滴边缘折射)
+
+    参数:
+        image: BGR 图像
+        num_drops: 水珠数量 (None=随机 5~20)
+        drop_radius_range: 半径范围 (None=默认 8~30px)
+    """
+    if num_drops is None:
+        num_drops = random.randint(5, 20)
+    if drop_radius_range is None:
+        drop_radius_range = (8, 30)
+
+    h, w = image.shape[:2]
+    result = image.astype(np.float32)
+
+    # 构建水滴边缘蒙版 (用于叠加暗环)
+    edge_mask = np.zeros((h, w), dtype=np.float32)
+
+    for _ in range(num_drops):
+        cx = random.randint(10, w - 10)
+        cy = random.randint(10, h - 10)
+        radius = random.randint(*drop_radius_range)
+
+        # 球面透镜映射
+        map_x, map_y, inside = spherical_lens_map(h, w, cx, cy, radius)
+
+        # 对水珠区域做 remap
+        for c in range(3):
+            warped = cv2.remap(result[:, :, c], map_x, map_y,
+                                cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=255)
+            result[:, :, c] = np.where(inside, warped, result[:, :, c])
+
+        # 水滴边缘暗环 (模拟折射边界)
+        ring = np.zeros((h, w), dtype=np.float32)
+        cv2.circle(ring, (cx, cy), radius, 1.0, -1)
+        ring = cv2.GaussianBlur(ring, (radius // 2 * 2 + 1, radius // 2 * 2 + 1),
+                                radius // 4)
+        # 形态学梯度提取环形边缘
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        dilated = cv2.dilate(ring, kernel)
+        eroded = cv2.erode(ring, kernel)
+        ring_edge = cv2.subtract(dilated, eroded)
+        ring_edge = cv2.GaussianBlur(ring_edge, (5, 5), 2)
+        edge_mask += ring_edge * 0.15  # 轻微暗化
+
+    # 叠加水滴边缘暗环
+    for c in range(3):
+        result[:, :, c] = result[:, :, c] * (1.0 - edge_mask)
+
+    # 对有水珠的区域做轻微全局模糊 (模拟光学散射)
+    # 仅在水珠密集区域模糊
+    if num_drops > 8:
+        blurred = cv2.GaussianBlur(result, (3, 3), 1)
+        blur_weight = np.clip(edge_mask * 3, 0, 0.4)
+        for c in range(3):
+            result[:, :, c] = (result[:, :, c] * (1.0 - blur_weight) +
+                               blurred[:, :, c] * blur_weight)
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def generate_water_drops(index):
+    """生成水珠折射测试图。"""
+    qr_img = generate_qr()
+    result = apply_water_drops(qr_img)
+    return f"waterdrop_{index:04d}.png", result
+
+
+# ============================================================================
 # 批量生成
 # ============================================================================
 
@@ -241,6 +355,8 @@ def main():
                    args.count, 'Task A: Coffee stains')
     batch_generate(generate_blue_ink, os.path.join(root, 'liquid_blue_ink'),
                    args.count, 'Task B: Blue ink bleeding')
+    batch_generate(generate_water_drops, os.path.join(root, 'liquid_water_drops'),
+                   max(args.count, 40), 'Task C: Water drops refraction')
 
 if __name__ == '__main__':
     main()
