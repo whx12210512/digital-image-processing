@@ -505,6 +505,103 @@ class SpeckleFilter:
 
 
 # ============================================================================
+# 模块 7: 运动模糊恢复 (Motion Deblurrer)
+# ============================================================================
+
+class MotionDeblurrer:
+    """
+    使用反锐化掩膜 + 拉普拉斯锐化恢复运动模糊的 QR 码模块边界。
+
+    数学原理:
+        1. Unsharp Masking (反锐化掩膜):
+           sharp = original + amount * (original - blurred)
+           其中 blurred = GaussianBlur(original, sigma=2-4)
+           "original - blurred" = 高频细节 (边缘)
+           叠加回去 = 增强边缘对比度
+
+        2. Laplacian 锐化:
+           sharp = original - k * Laplacian(original)
+           Laplacian 提取二阶导数 (边缘变化率)
+           减去 Laplacian = 边缘过冲 → 黑白边界更锐利
+
+        3. 激进的局部自适应二值化:
+           小 block_size (7-9px) 可以在模糊区域重新建立
+           清晰的模块边界, 因为局部阈值跟随模糊过渡区。
+    """
+
+    @staticmethod
+    def deblur(bgr):
+        """
+        多尺度自适应二值化 + 反锐化掩膜恢复运动模糊 QR 码。
+
+        策略: 运动模糊模糊了模块边界 → 不同模糊程度需要不同
+        block_size 的局部阈值才能正确重建边界。
+        生成多个二值化变体, 让扫描器并行尝试。
+        """
+        if len(bgr.shape) == 3:
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = bgr.copy()
+
+        # Unsharp masking 增强边缘
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        unsharp = cv2.addWeighted(gray, 3.0, blurred, -2.0, 0)
+
+        # Laplacian 锐化
+        lap_k = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        sharp = np.clip(cv2.filter2D(unsharp, -1, lap_k), 0, 255).astype(np.uint8)
+
+        # 多尺度自适应二值化 —— 哪个 block_size 能重建模块边界?
+        best = None
+        best_score = -1
+        for bs in [5, 7, 9, 11, 15, 21]:
+            binary = cv2.adaptiveThreshold(sharp, 255,
+                                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY, bs, 2)
+            black_ratio = np.count_nonzero(binary == 0) / binary.size
+            if 0.15 < black_ratio < 0.55:
+                # 偏好黑像素比例接近 30% (典型 QR 码)
+                score = 1.0 - abs(black_ratio - 0.30)
+                if score > best_score:
+                    best_score = score
+                    best = binary
+
+        if best is None:
+            best = cv2.adaptiveThreshold(sharp, 255,
+                                          cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                          cv2.THRESH_BINARY, 9, 2)
+
+        return cv2.cvtColor(best, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def deblur_multi(bgr):
+        """
+        生成多个二值化变体用于并行解码尝试。
+
+        对运动模糊图像, 不同区域的模糊程度不同,
+        单一 block_size 无法全局最优。
+        返回多个二值化结果, 让扫描器分别尝试。
+        """
+        if len(bgr.shape) == 3:
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = bgr.copy()
+
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        unsharp = cv2.addWeighted(gray, 3.0, blurred, -2.0, 0)
+        lap_k = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        sharp = np.clip(cv2.filter2D(unsharp, -1, lap_k), 0, 255).astype(np.uint8)
+
+        variants = []
+        for bs in [5, 7, 9, 11, 15]:
+            binary = cv2.adaptiveThreshold(sharp, 255,
+                                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY, bs, 2)
+            variants.append(cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR))
+        return variants
+
+
+# ============================================================================
 # 高级 CV 扫描器主类 v1.1.0
 # ============================================================================
 
@@ -525,6 +622,7 @@ class AdvancedCVScanner:
         self.restorer = AdvancedRestoration()
         self.stain_remover = ColorStainRemover()
         self.speckle_filter = SpeckleFilter()
+        self.deblurrer = MotionDeblurrer()
 
     def classify_damage(self, gray):
         issues = []
@@ -661,6 +759,12 @@ class AdvancedCVScanner:
         try:
             despeckled = self.speckle_filter.remove_speckles(bgr)
             variants.append(('despeckled', despeckled))
+        except: pass
+
+        # ---- V9: 运动模糊恢复 (multi-scale adaptive threshold) ----
+        try:
+            for i, dv in enumerate(self.deblurrer.deblur_multi(bgr)):
+                variants.append((f'deblur_{i}', dv))
         except: pass
 
         # ---- 解码所有变体 ----
