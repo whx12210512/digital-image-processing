@@ -460,6 +460,51 @@ class ColorStainRemover:
 
 
 # ============================================================================
+# 模块 6: 微小墨点滤除 (Speckle Filter)
+# ============================================================================
+
+class SpeckleFilter:
+    """
+    使用形态学开运算滤除微小黑点（1-4px 墨斑），保留大块模块（6-10px）。
+
+    数学原理:
+        开运算 = 先腐蚀后膨胀。
+        腐蚀: 移除小于核的黑色区域 → 1-4px 墨点消失
+        膨胀: 恢复被腐蚀削薄的 QR 模块边界 → 10px 模块复原
+        核大小 (3px): 介于墨点 (1-4px) 和 QR 模块 (6-10px) 之间
+
+    效果: 4px 以下的墨点全被消除, QR 模块保留。
+    """
+
+    @staticmethod
+    def remove_speckles(bgr, kernel_size=3):
+        """
+        滤除图像中的微小墨斑。
+
+        参数:
+            bgr:         BGR 图像
+            kernel_size: 形态学核大小 (应介于墨斑大小和模块大小之间)
+        返回:
+            滤除后的 BGR 图像
+        """
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        # 自适应二值化 → 白底黑码
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                        cv2.THRESH_BINARY, 11, 3)
+        # 形态学开运算: 移除小于 kernel 的黑色斑点
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                           (kernel_size, kernel_size))
+        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+
+        # 如果开运算改变了太多 (> 60% 像素翻转), 可能不是墨点污染, 回退
+        changed = np.count_nonzero(binary != opened) / binary.size
+        if changed > 0.6:
+            return bgr
+
+        return cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR)
+
+
+# ============================================================================
 # 高级 CV 扫描器主类 v1.1.0
 # ============================================================================
 
@@ -479,6 +524,7 @@ class AdvancedCVScanner:
         self.cropper = MultiROICropper()
         self.restorer = AdvancedRestoration()
         self.stain_remover = ColorStainRemover()
+        self.speckle_filter = SpeckleFilter()
 
     def classify_damage(self, gray):
         issues = []
@@ -609,6 +655,12 @@ class AdvancedCVScanner:
         try:
             cleaned = self.stain_remover.remove_stains(bgr)
             variants.append(('stain_free', cleaned))
+        except: pass
+
+        # ---- V8: 微小墨点滤除 (1-4px speckle removal) ----
+        try:
+            despeckled = self.speckle_filter.remove_speckles(bgr)
+            variants.append(('despeckled', despeckled))
         except: pass
 
         # ---- 解码所有变体 ----
