@@ -71,12 +71,9 @@ def generate_qr_image(data, size=QR_SIZE, border=BORDER):
     """
     生成单张 QR 码，返回 BGR numpy 数组。
     """
-    ecc = random.choice([
-        qrcode.constants.ERROR_CORRECT_L,
-        qrcode.constants.ERROR_CORRECT_M,
-        qrcode.constants.ERROR_CORRECT_Q,
-        qrcode.constants.ERROR_CORRECT_H,
-    ])
+    # Force H-level ECC (30% recovery) so ink pollution tests actually
+    # measure decoder robustness, not just ECC capacity exhaustion
+    ecc = qrcode.constants.ERROR_CORRECT_H
     qr = qrcode.QRCode(version=None, error_correction=ecc, box_size=10, border=border)
     qr.add_data(data)
     qr.make(fit=True)
@@ -265,12 +262,18 @@ def generate_ink_mask(shape, num_blots=None, coverage=None,
         add_satellite_droplets(blot, cx, cy, radius)
         mask = cv2.bitwise_or(mask, blot)
 
-    # 覆盖率控制: 如果当前覆盖超过目标，按比例随机删除部分墨团区域
+    # 覆盖率控制: 相对于数据区面积 (排除定位符区域)
+    # 三个定位符约占 3 * (0.22*size)² = 14.5% 面积, 数据区约 85%
     if coverage is not None and coverage > 0:
-        current_cov = np.count_nonzero(mask) / (h * w)
+        data_area = h * w
+        if avoid_boxes is not None:
+            fp_used = 0
+            for (x1, y1, x2, y2) in avoid_boxes.values():
+                fp_used += (x2 - x1) * (y2 - y1)
+            data_area = max(h * w - fp_used, h * w * 0.6)
+        current_cov = np.count_nonzero(mask) / data_area
         if current_cov > coverage * 1.15:  # 超出 15% 容差
-            # 随机腐蚀 mask 达到目标覆盖率
-            target_pixels = int(h * w * coverage)
+            target_pixels = int(data_area * coverage)
             current_pixels = np.count_nonzero(mask)
             if current_pixels > target_pixels:
                 # 随机丢弃 (current_pixels - target_pixels) 个墨点
@@ -318,14 +321,13 @@ def generate_data_pollution_image(index, coverage_level=None):
         avoid_boxes=fp_boxes,
     )
 
-    # 叠加: 白色 QR → 墨水区变暗
-    result = qr_img.copy()
-    result[ink_mask > 0] = (result[ink_mask > 0].astype(np.float32) * 0.15).astype(np.uint8)
+    # Apply pure black ink (simulates real ink/photocopy smudge)
+    qr_img[ink_mask > 0] = (0, 0, 0)
 
     # 文件名编码覆盖率
     level_str = f"{int(coverage_level*100):02d}"
     fname = f"data_pollution_{index:04d}_cov{level_str}.png"
-    return fname, result
+    return fname, qr_img
 
 
 # ============================================================================

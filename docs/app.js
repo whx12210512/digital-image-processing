@@ -475,6 +475,70 @@ async function decodeImageFile(file, scanFormat) {
         insertUnique(merged, scanQrIterative(inverted(imageData.data), w, h, 'jsQR (raw inv)', 15));
     }
 
+    // ====== Finder-pattern repair: detect and fix ink-damaged corners ======
+    if (wantQr && merged.length < 2) {
+        try {
+            const fpSize = Math.floor(Math.min(w, h) * 0.22);
+            const corners = [
+                { name: 'TL', x: 0, y: 0 },
+                { name: 'TR', x: w - fpSize, y: 0 },
+                { name: 'BL', x: 0, y: h - fpSize },
+            ];
+            let damaged = 0;
+            const repCanvas = document.createElement('canvas');
+            repCanvas.width = w; repCanvas.height = h;
+            const repCtx = repCanvas.getContext('2d');
+            repCtx.putImageData(imageData, 0, 0);
+
+            for (const c of corners) {
+                // Sample corner region: if >40% pixels are dark (ink damage), repair it
+                let darkCount = 0, total = 0;
+                for (let dy = 0; dy < fpSize; dy += 3) {
+                    for (let dx = 0; dx < fpSize; dx += 3) {
+                        const idx = ((c.y + dy) * w + (c.x + dx)) * 4;
+                        const gray = imageData.data[idx] * 0.299 + imageData.data[idx + 1] * 0.587 + imageData.data[idx + 2] * 0.114;
+                        if (gray < 100) darkCount++;
+                        total++;
+                    }
+                }
+                if (total > 0 && darkCount / total > 0.4) {
+                    damaged++;
+                    // Erase ink in this corner (fill white) then draw clean finder pattern
+                    repCtx.fillStyle = '#FFFFFF';
+                    repCtx.fillRect(c.x, c.y, fpSize, fpSize);
+                    // Draw 7x7 module finder pattern (black-white-black concentric)
+                    const cx = c.x + fpSize / 2;
+                    const cy = c.y + fpSize / 2;
+                    const half = fpSize / 2;
+                    repCtx.fillStyle = '#000000';
+                    repCtx.fillRect(cx - half, cy - half, fpSize, fpSize);
+                    const inner1 = fpSize * 5 / 14;
+                    repCtx.fillStyle = '#FFFFFF';
+                    repCtx.fillRect(cx - inner1, cy - inner1, inner1 * 2, inner1 * 2);
+                    const inner2 = fpSize * 3 / 14;
+                    repCtx.fillStyle = '#000000';
+                    repCtx.fillRect(cx - inner2, cy - inner2, inner2 * 2, inner2 * 2);
+                }
+            }
+
+            if (damaged > 0) {
+                // Re-scan the repaired image with jsQR + BarcodeDetector
+                const repImageData = repCtx.getImageData(0, 0, w, h);
+                const repEnhanced = grayscaleEnhance(repImageData);
+                insertUnique(merged, scanQrIterative(repEnhanced.data, w, h, 'jsQR(repair)', 25));
+                // Also try BarcodeDetector on repaired canvas
+                if ('BarcodeDetector' in window) {
+                    try {
+                        const detected = await new BarcodeDetector({ formats: ['qr_code'] }).detect(repCanvas);
+                        for (const b of detected) {
+                            insertUnique(merged, [{ text: b.rawValue, type: 'QR Code', confidence: 'BD(repair)' }]);
+                        }
+                    } catch (e) { /* ok */ }
+                }
+            }
+        } catch (e) { /* repair failed, continue */ }
+    }
+
     // ====== Region-based fallback for sparse/large images ======
     if (wantQr && merged.length < 2) {
         try {
