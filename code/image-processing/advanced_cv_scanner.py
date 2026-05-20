@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-AdvancedCVScanner v1.1.0 — 极端降质图像物理修复预处理管线
+AdvancedCVScanner v2.0.0 — 极端降质图像物理修复预处理管线
 ===========================================================
 纯传统 DIP 方法: 矩阵运算、空间域滤波、OpenCV 形态学算子。
 不依赖任何深度学习模型。
 
-v1.1.0 改进:
+v2.0.0 改进:
   - 定位符检测: 轮廓法 → NCC 模板匹配 (cv2.matchTemplate)
   - 柱面展平:   边缘法 → 扫描线亮度剖面分析
   - 新增:       条形码自适应条宽重采样
@@ -615,28 +615,28 @@ class TearInpainter:
         保持等照度线(isophotes)的连续性。
 
     撕裂检测:
-        大块纯白区域 (RGB=255) + 周围有正常内容 → 判定为撕裂
+        大面积异常空白区域 + 周围有正常内容 → 判定为撕裂
         排除: 整个图像本来就是白底的正常区域
     """
 
     @staticmethod
     def detect_tear_mask(gray):
-        """检测撕裂/缺失区域 (大面积纯白块)。"""
+        """检测撕裂/缺失区域 (大面积白块, 含近白色)。"""
         h, w = gray.shape
-        # 纯白区域
-        white_mask = (gray > 250).astype(np.uint8) * 255
+        # 降低阈值 (230) 捕获更多非纯白撕裂 (灰色边缘/阴影区分)
+        white_mask = (gray > 230).astype(np.uint8) * 255
 
         # 只保留大块白区 (小面积是正常间隙)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         cleaned = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel)
 
-        # 只保留连通区域 > 500px² (排除正常的白底)
+        # 只保留连通区域 > 300px² (降低门槛捕获更多撕裂)
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
             cleaned, connectivity=8)
         tear_mask = np.zeros_like(cleaned)
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
-            if area > 500:
+            if area > 300:
                 tear_mask[labels == i] = 255
 
         # 排除边缘正常白色区域 (整行/整列全白通常是空白边距)
@@ -675,12 +675,204 @@ class TearInpainter:
 
 
 # ============================================================================
-# 高级 CV 扫描器主类 v1.1.0
+# 模块 9: 条码透视归一化 (Perspective Barcode Normalizer) — v2.0.0
+# ============================================================================
+
+class PerspectiveBarcodeNormalizer:
+    """
+    检测并校正一维条形码的透视畸变。
+
+    算法:
+        1. 检测条码区域的上下边界点 (通过扫描线梯度)
+        2. 拟合边界多项式 → 判断是否透视畸变
+        3. 计算逆透视变换 → 将斜视条码归一化为正视矩形
+        4. 同时处理柱面弯曲 (配合 CylindricalUnwarper)
+
+    关键: 一维条码信息仅沿水平方向分布 → 透视压缩一侧的条宽
+          比例被破坏 → 通过逆变换恢复均匀条宽。
+    对于完全水平透视 (只压缩一侧), 使用简单的线性拉伸;
+    对于柱面弯曲, 使用扫描线密度修正。
+    """
+
+    @staticmethod
+    def detect_barcode_bounds(gray):
+        """
+        扫描线法检测条码区域上下边界。
+        利用条码内部黑白交替导致局部方差大的特性。
+        """
+        h, w = gray.shape
+        top_pts, bot_pts = [], []
+
+        for x in range(0, w, max(1, w // 30)):
+            col = gray[:, x].astype(np.float32)
+            # 滑动窗口方差
+            window = 15
+            if h <= window: continue
+            variances = np.array([np.var(col[i:i+window]) for i in range(h-window)])
+            max_var = np.max(variances)
+            if max_var > 80:  # 条码区域方差明显大于背景
+                thresh = max_var * 0.25
+                active = np.where(variances > thresh)[0]
+                if len(active) >= 5:
+                    top_pts.append((x, active[0] + window//2))
+                    bot_pts.append((x, active[-1] + window//2))
+
+        if len(top_pts) < 10:
+            return None, None
+        return top_pts, bot_pts
+
+    @staticmethod
+    def normalize_perspective(bgr):
+        """
+        检测并校正透视畸变。方法: 轮廓分析 + 密度均衡。
+
+        策略优先级:
+          1. 扫描线边界检测 (精确但需要清晰边界)
+          2. 二值化 + 轮廓分析 (鲁棒, 适用于模糊条码)
+          3. 密度梯度均衡 (最后手段, 不依赖边界)
+        """
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+
+        # --- Method 1: 扫描线边界检测 ---
+        top_pts, bot_pts = PerspectiveBarcodeNormalizer.detect_barcode_bounds(gray)
+        if top_pts is not None and len(top_pts) >= 10:
+            tp_arr = np.array(top_pts)
+            bp_arr = np.array(bot_pts)
+            try:
+                top_poly = np.polyfit(tp_arr[:, 0], tp_arr[:, 1], 2)
+                bot_poly = np.polyfit(bp_arr[:, 0], bp_arr[:, 1], 2)
+
+                tl = np.polyval(top_poly, 0)
+                tr = np.polyval(top_poly, w - 1)
+                bl = np.polyval(bot_poly, 0)
+                br = np.polyval(bot_poly, w - 1)
+
+                lh = abs(bl - tl)
+                rh = abs(br - tr)
+
+                if min(lh, rh) > 10 and max(lh, rh) / max(min(lh, rh), 1) >= 1.25:
+                    margin = 5
+                    src = np.float32([
+                        [0, max(0, tl - margin)], [w - 1, max(0, tr - margin)],
+                        [w - 1, min(h - 1, br + margin)], [0, min(h - 1, bl + margin)],
+                    ])
+                    target_h = int(min(h, max(lh, rh) * 1.3))
+                    dst = np.float32([[0, 0], [w - 1, 0], [w - 1, target_h - 1], [0, target_h - 1]])
+                    H = cv2.getPerspectiveTransform(src, dst)
+                    return cv2.warpPerspective(bgr, H, (w, target_h),
+                                              borderMode=cv2.BORDER_CONSTANT, borderValue=(255,255,255))
+            except:
+                pass
+
+        # --- Method 2: 二值化 + 轮廓检测 ---
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 21, 5)
+        # 大核闭运算连接条码区域
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            # 取面积最大的轮廓
+            largest = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(largest)
+            if area > w * h * 0.1:
+                # 获取最小外接矩形
+                rect = cv2.minAreaRect(largest)
+                box = cv2.boxPoints(rect).astype(np.int32)
+
+                # 对四个角点排序: TL, TR, BR, BL
+                pts = box.astype(np.float32)
+                # 按 x 排序分为左右两组
+                sorted_x = pts[np.argsort(pts[:, 0])]
+                left = sorted_x[:2]
+                right = sorted_x[2:]
+                # 每组按 y 排序
+                left = left[np.argsort(left[:, 1])]
+                right = right[np.argsort(right[:, 1])]
+
+                src_pts = np.float32([left[0], right[0], right[1], left[1]])
+
+                # 目标矩形
+                tl_w = np.linalg.norm(right[0] - left[0])
+                bl_w = np.linalg.norm(right[1] - left[1])
+                target_w = int((tl_w + bl_w) / 2)
+                tl_h = np.linalg.norm(left[1] - left[0])
+                tr_h = np.linalg.norm(right[1] - right[0])
+                target_h = int((tl_h + tr_h) / 2)
+
+                if target_w > 20 and target_h > 20:
+                    dst_pts = np.float32([[0, 0], [target_w - 1, 0],
+                                          [target_w - 1, target_h - 1], [0, target_h - 1]])
+                    try:
+                        H = cv2.getPerspectiveTransform(src_pts, dst_pts)
+                        return cv2.warpPerspective(bgr, H, (target_w, target_h),
+                                                  borderMode=cv2.BORDER_CONSTANT,
+                                                  borderValue=(255, 255, 255))
+                    except:
+                        pass
+
+        # --- Method 3: 密度均衡 (不需要边界检测) ---
+        return PerspectiveBarcodeNormalizer._density_equalize(bgr)
+
+    @staticmethod
+    def _density_equalize(bgr):
+        """基于密度的条宽均衡: 拉伸黑密度低的列, 压缩黑密度高的列。"""
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+
+        # 找到条码行
+        row_means = np.mean(gray, axis=1)
+        bar_rows = np.where(row_means < 240)[0]
+        if len(bar_rows) < 20:
+            return bgr
+
+        bar = gray[bar_rows[0]:bar_rows[-1] + 1, :]
+        bh = bar.shape[0]
+
+        # 每列黑密度
+        col_density = np.mean(bar < 128, axis=0).astype(np.float64)
+        kernel_size = max(5, w // 20)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        col_density = cv2.GaussianBlur(col_density.reshape(1, -1), (kernel_size, 1), kernel_size//3)[0]
+
+        # 目标密度 = 最大密度的 90%
+        target = np.percentile(col_density[col_density > 0.01], 90) if np.any(col_density > 0.01) else 0.3
+        if target < 0.05:
+            return bgr
+
+        scale = np.clip(target / np.maximum(col_density, 0.02), 0.4, 3.0)
+
+        # 构建 remap — 累积缩放
+        map_x = np.zeros((bh, w), dtype=np.float32)
+        cum = 0.0
+        for j in range(w):
+            cum += scale[j]
+            map_x[:, j] = cum
+        max_x = map_x[:, -1].mean()
+        if max_x < 1:
+            return bgr
+        map_x = map_x / max_x * (w - 1)
+
+        map_y = np.tile(np.arange(bh, dtype=np.float32).reshape(-1, 1), (1, w))
+        equalized = cv2.remap(bar, map_x, map_y, cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+
+        # 重建全图
+        result = np.full_like(bgr, 255)
+        result[bar_rows[0]:bar_rows[-1] + 1, :] = cv2.cvtColor(equalized, cv2.COLOR_GRAY2BGR)
+        return result
+
+
+# ============================================================================
+# 模块 8 (续): 增强撕裂修复 — 多尺度桥接 + 撕裂碎片拼接
 # ============================================================================
 
 class AdvancedCVScanner:
     """
-    一站式降质图像预处理与解码扫描器 v1.1.0。
+    一站式降质图像预处理与解码扫描器 v2.0.0。
 
     改进:
       - NCC 模板匹配替代轮廓检测 (定位符检测鲁棒性大幅提升)
@@ -697,6 +889,7 @@ class AdvancedCVScanner:
         self.speckle_filter = SpeckleFilter()
         self.deblurrer = MotionDeblurrer()
         self.tear_inpainter = TearInpainter()
+        self.perspective_normalizer = PerspectiveBarcodeNormalizer()
 
     def classify_damage(self, gray):
         issues = []
@@ -781,6 +974,19 @@ class AdvancedCVScanner:
                 variants.append(('bar_resampled', cv2.cvtColor(resampled, cv2.COLOR_GRAY2BGR)))
         except: pass
 
+        # ---- V2b: 条码透视归一化 (v2.0.0) ----
+        try:
+            if w > h * 1.3:  # 可能是条形码 (宽度大于高度)
+                normalized = self.perspective_normalizer.normalize_perspective(bgr)
+                if normalized is not None:
+                    variants.append(('persp_norm', normalized))
+                    # 对归一化后的结果再二值化
+                    ng = cv2.cvtColor(normalized, cv2.COLOR_BGR2GRAY)
+                    nb = cv2.adaptiveThreshold(ng, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                              cv2.THRESH_BINARY, 15, 4)
+                    variants.append(('persp_norm_bin', cv2.cvtColor(nb, cv2.COLOR_GRAY2BGR)))
+        except: pass
+
         # ---- V3: 曲面展平 ----
         try:
             unwarped = self.unwarper.unwarp(bgr)
@@ -822,6 +1028,34 @@ class AdvancedCVScanner:
                         cv2.cvtColor(patched_vlow, cv2.COLOR_GRAY2BGR), is_1d_barcode=False)
                     if len(final_v.shape) == 2: final_v = cv2.cvtColor(final_v, cv2.COLOR_GRAY2BGR)
                     variants.append(('finder_vlow', final_v))
+        except: pass
+
+        # ---- V5c: 多码裁剪 (极低阈值, 针对 multi_qr) ----
+        try:
+            centers_tiny = self.finder_patcher.detect_finder_centers(gray, threshold=0.30)
+            if len(centers_tiny) >= 4:  # 多个定位符 → 多码图像
+                rois = self.cropper.crop_rois(gray, bgr)
+                for i, (rg, rb, _) in enumerate(rois):
+                    if rb is not None and rb.shape[0] > 20 and rb.shape[1] > 20:
+                        variants.append((f'roi_tiny_{i}', rb))
+        except: pass
+
+        # ---- V5d: 超低阈值查找器 + 修补 + 去噪 (for very damaged QR) ----
+        try:
+            centers_dmg = self.finder_patcher.detect_finder_centers(gray, threshold=0.25)
+            if 2 <= len(centers_dmg) < 3:
+                patched_dmg = gray.copy()
+                if self.finder_patcher.reconstruct_missing_finder(patched_dmg, centers_dmg):
+                    restored_dmg = self.restorer.restore(
+                        cv2.cvtColor(patched_dmg, cv2.COLOR_GRAY2BGR), is_1d_barcode=False)
+                    if len(restored_dmg.shape) == 2:
+                        restored_dmg = cv2.cvtColor(restored_dmg, cv2.COLOR_GRAY2BGR)
+                    variants.append(('finder_dmg', restored_dmg))
+            elif len(centers_dmg) >= 4:
+                rois_dmg = self.cropper.crop_rois(gray, bgr)
+                for i, (rg, rb, _) in enumerate(rois_dmg):
+                    if rb is not None and rb.shape[0] > 20 and rb.shape[1] > 20:
+                        variants.append((f'roi_dmg_{i}', rb))
         except: pass
 
         # ---- V6: 原图 + 查找器修补 (不依赖检测) ----
@@ -924,7 +1158,7 @@ class AdvancedCVScanner:
 
     def process_and_decode(self, image_input):
         """
-        主入口 v1.1.0: 全模块无条件应用策略。
+        主入口 v2.0.0: 全模块无条件应用策略。
 
         生成 6~8 个预处理变体 → 逐一 pyzbar 解码 → 取并集返回。
         不再依赖启发式分类，每个模块都有机会贡献。

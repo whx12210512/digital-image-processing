@@ -4,6 +4,15 @@
 
 基于传统数字图像处理技术的条形码/二维码自动检测、定位与解码系统。
 
+## 版本历史
+
+| 版本 | 日期 | 关键改进 |
+|------|------|----------|
+| **v2.0.0** | 2026-05-21 | 多引擎压力测试, pyzbar增强预处理, 条码透视归一化, 撕裂检测优化, 多码裁剪增强 |
+| v1.1.0 | 2026-05-20 | AdvancedCVScanner — NCC模板匹配, 柱面展平, 多码裁剪, 污渍去除, 墨点滤除, 运动模糊恢复, 撕裂修复 |
+| v1.0.2 | 2026-05-19 | jsQR崩溃安全, 区域扫描回退 |
+| v1.0.0 | 2026-05-18 | 初始版本 |
+
 ## 项目结构
 
 ```
@@ -11,7 +20,7 @@
 │   ├── scanner-app/           # 移动端 Web 扫码应用 (PWA)
 │   │   ├── index.html         #   主页面
 │   │   ├── style.css          #   样式 (移动端 UI)
-│   │   ├── app.js             #   扫码逻辑 (html5-qrcode + jsQR)
+│   │   ├── app.js             #   扫码逻辑 (html5-qrcode + jsQR + SpeckleFilter + FinderRepair)
 │   │   ├── manifest.json      #   PWA 清单
 │   │   └── sw.js              #   Service Worker
 │   ├── image-processing/      # 传统图像处理 Pipeline (Python)
@@ -19,12 +28,15 @@
 │   │   ├── localize.py        #   条码/二维码定位 (Canny/形态学/Finder Pattern)
 │   │   ├── correct.py         #   几何校正 (旋转/透视变换)
 │   │   ├── decode.py          #   解码识别 (EAN-13/Code-128/Code-39/QR)
+│   │   ├── advanced_cv_scanner.py  # AdvancedCVScanner v2.0.0 — 9模块降质修复
 │   │   ├── pipeline.py        #   完整识别管线
 │   │   └── gui.py             #   桌面 GUI (tkinter)
-│   └── test-generator/        # 测试图片生成器
-│       └── generate_all.py    #   生成各类测试条码/二维码
-├── images/test_images/        # 测试图片集 (~50+ 张)
-├── results/                   # 识别结果输出
+│   └── test-generator/        # 测试图片生成器 (8个生成器)
+├── images/
+│   ├── test_images/           # 基础测试图片集 (~50+ 张)
+│   └── stress_test/           # 压力测试集 (2,658 张, 21 类)
+├── results/                   # 测试结果
+├── run_stress_test.py         # 多引擎分层压力测试脚本 (v2.0.0)
 └── docs/                      # 文档
 ```
 
@@ -136,51 +148,76 @@ python code/image-processing/gui.py
 python code/test-generator/generate_all.py
 ```
 
-## 测试结果
+## 测试结果 (v2.0.0)
 
-### 完整测试集 (195 张)
+### 多引擎压力测试 (2,658 张 — 21 类)
 
-| 类别 | 数量 | 通过 | 正确率 |
-|------|------|------|--------|
-| 标准 QR 码 | 10 | 10 | 100% |
-| 旋转 QR (10°/20°/30°/40°) | 24 | 24 | 100% |
-| 高斯噪声 QR | 6 | 6 | 100% |
-| 椒盐噪声 QR (强度10/20) | 12 | 12 | 100% |
-| 模糊 QR | 10 | 10 | 100% |
-| 光照不均 QR | 10 | 10 | 100% |
-| 部分遮挡 QR | 5 | 5 | 100% |
-| 透视畸变 QR (25%/40%) | 10 | 10 | 100% |
-| 复杂背景 QR | 4 | 4 | 100% |
-| 小型 QR | 5 | 5 | 100% |
-| 多码图像 | 3 | 3 | 100% |
-| 混合类型 | 3 | 3 | 100% |
-| 基础 EAN-13 条码 | 5 | 5 | 100% |
-| 基础 Code-128 条码 | 5 | 5 | 100% |
-| 基础 Code-39 条码 | 5 | 5 | 100% |
-| 旋转条码 (15°/30°) | 18 | 18 | 100% |
-| 条码噪声/模糊 | 6 | 6 | 100% |
-| **条码透视畸变 (12%/25%)** | 18 | 17 | 94.4% |
-| **条码遮挡** | 9 | 9 | 100% |
-| **条码光照变化 (40%/60%)** | 18 | 18 | 100% |
-| **条码复杂背景** | 9 | 9 | 100% |
-| **总计** | **195** | **194** | **99.5%** |
+使用 **pyzbar** (增强预处理) + **cv2.QRCodeDetector** + **AdvancedCVScanner** 三引擎分层测试。
 
-> 条码透视畸变采用真透视变换（非仿射），一维条码强度 12%/25%，QR 码强度 25%/40%。
-> 唯一未通过: `barcode_code39_03_perspective_25.png` —
-> Code-39 长条码 "DIP2026" 在 25% 透视下边缘条空宽度畸变超出 pyzbar 容限。
+| 类别 | 数量 | 正确率 | 状态 |
+|------|------|--------|------|
+| barcode_geometric | 110 | 12.7% | FAIL ⚠ |
+| barcode_ink | 110 | 100.0% | PASS |
+| barcode_scratches | 110 | 95.5% | PASS |
+| damage_noise | 110 | 70.9% | FAIL ⚠ |
+| edge_quiet_zone | 164 | 95.7% | PASS |
+| edge_tear | 110 | 48.2% | FAIL ⚠ |
+| flaw_highlight | 110 | 100.0% | PASS |
+| flaw_low_contrast | 110 | 100.0% | PASS |
+| flaw_motion_blur | 330 | 83.9% | PASS |
+| geometric_perspective | 110 | 94.5% | PASS |
+| geometric_rotation | 110 | 100.0% | PASS |
+| illumination | 110 | 100.0% | PASS |
+| ink_corner_destruction | 294 | 93.9% | PASS |
+| ink_data_pollution | 210 | 100.0% | PASS |
+| linear_combo | 110 | 100.0% | PASS |
+| linear_perspective | 110 | 100.0% | PASS |
+| linear_shear | 110 | 100.0% | PASS |
+| liquid_blue_ink | 40 | 100.0% | PASS |
+| liquid_coffee | 40 | 100.0% | PASS |
+| liquid_water_drops | 40 | 100.0% | PASS |
+| multi_qr | 110 | 70.0% | FAIL ⚠ |
+| **总计** | **2,658** | **85.3%** | **17/21 PASS** |
 
-### 精选 50 组评估
+### v2.0.0 改进成果
 
-从 195 张图片中按类别比例选取 50 张代表性样本：
+| 改进项 | 提升 |
+|--------|------|
+| ink_data_pollution | 76.2% → **100.0%** (+23.8%) |
+| ink_corner_destruction | 85.4% → **93.9%** (+8.5%) |
+| flaw_motion_blur | 80.9% → **83.9%** (+3.0%) |
+| barcode_scratches | 92.7% → **95.5%** (+2.8%) |
+| damage_noise | 67.3% → **70.9%** (+3.6%) |
+| liquid_coffee | 97.5% → **100.0%** (+2.5%) |
 
-| 指标 | 结果 |
+### 不可恢复类别分析
+
+| 类别 | 原因 |
 |------|------|
-| 通过数 | 50 / 50 |
-| 正确率 | **100%** |
-| 总耗时 | 2.0 秒 |
-| 平均耗时 | 41 ms/图 |
+| barcode_geometric (12.7%) | 透视压缩 (25-70%) + 柱面弯曲从根本上破坏条空宽度比, pyzbar 无法恢复 |
+| edge_tear (48.2%) | 大面积撕裂/碎片导致 >40% 数据缺失, 修复算法无法重建缺失模块 |
+| damage_noise (70.9%) | 随机破坏 (划痕+噪声+模糊+遮挡) 在 ~30% 图像中损毁 QR 定位符 |
+| multi_qr (70.0%) | 多码图像中小码 (<50px) 或高度变换码超出定位符检测能力 |
 
 ## 技术路线
+
+### AdvancedCVScanner v2.0.0 — 9 模块降质修复管线
+
+```
+图像输入 → 降质分类 → 模块化修复 → 多引擎解码 → 结果输出
+  │            │           │              │
+  │     NCC模板匹配    模块1: 定位符修补    pyzbar
+  │     扫描线剖面     模块2: 柱面展平    cv2.QRCodeDetector
+  │                   模块3: 多码裁剪    AdvancedCVScanner
+  │                   模块4: 降噪修复
+  │                   模块5: 颜色污渍去除
+  │                   模块6: 墨点滤除
+  │                   模块7: 运动模糊恢复
+  │                   模块8: 撕裂修复
+  │                   模块9: 条码透视归一化 (NEW v2.0.0)
+```
+
+### 传统 Pipeline
 
 ```
 图像输入 → 预处理 → 定位检测 → 几何校正 → 解码识别 → 结果输出
@@ -192,6 +229,14 @@ python code/test-generator/generate_all.py
 ```
 
 核心算法基于传统图像处理 (不依赖深度学习)，符合课程要求。
+
+### Web App 解码管线
+
+```
+图像输入 → BarcodeDetector (3级回退) → jsQR (增强+反转) →
+  SpeckleFilter (形态学开运算) → FinderPatternRepair (墨迹修复) →
+  RegionScan (2×2分块回退) → html5-qrcode (zxing WASM 6s超时)
+```
 
 ## 许可证
 

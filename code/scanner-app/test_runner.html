@@ -1,0 +1,24 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>APP Pipeline Test</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+</head><body><pre id="log"></pre>
+<script src="app.js"></script>
+<script>
+const L = document.getElementById('log');
+function log(m){L.textContent+=m+'\n';}
+
+// Wrapper: fetch image from URL, create File, call APP's actual decodeImageFile
+async function decodeOne(url) {
+    try {
+        const resp = await fetch(url);
+        if (!resp.ok) return -1;
+        const blob = await resp.blob();
+        const file = new File([blob], url.split('/').pop(), { type: blob.type || 'image/png' });
+        // Call the REAL app.js decodeImageFile with 'all' format
+        const results = await decodeImageFile(file, 'all');
+        return Array.isArray(results) ? results.length : -1;
+    } catch(e) { return -1; }
+}
+window.decodeOne = decodeOne;
+log('Test page ready. BarcodeDetector: ' + ('BarcodeDetector' in window));
+</script></body></html>

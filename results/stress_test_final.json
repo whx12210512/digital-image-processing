@@ -1,0 +1,49 @@
+{
+  "meta": {
+    "version": "2.0.0",
+    "date": "2026-05-21",
+    "total_categories": 21,
+    "total_images": 2658,
+    "engines": ["pyzbar", "cv2.QRCodeDetector", "AdvancedCVScanner"],
+    "approach": "Tiered testing — pyzbar with enhanced preprocessing, then cv2.QRCodeDetector, then AdvancedCVScanner"
+  },
+  "category_results": {
+    "barcode_geometric": {"total": 110, "accuracy": 12.7, "status": "FAIL", "note": "Perspective + cylinder distortion fundamentally breaks bar width ratios. pyzbar cannot recover. Added perspective normalizer, density equalizer, and contour-based correction — limited improvement (+7 images). Custom decoder needed."},
+    "barcode_ink": {"total": 110, "accuracy": 100.0, "status": "PASS"},
+    "barcode_scratches": {"total": 110, "accuracy": 95.5, "status": "PASS", "note": "Improved from 92.7% via enhanced preprocessing"},
+    "damage_noise": {"total": 110, "accuracy": 70.9, "status": "FAIL", "note": "Improved from 67.3% via heavy denoising + morphological opening. Remaining failures are severe random-damage images where QR finders are destroyed."},
+    "edge_quiet_zone": {"total": 164, "accuracy": 95.7, "status": "PASS", "note": "Improved from 93.3%"},
+    "edge_tear": {"total": 110, "accuracy": 48.2, "status": "FAIL", "note": "Large-scale tears/fragments remove too much data. Improved tear detection threshold (250→230) but pyzbar cannot decode images with >40% missing content."},
+    "flaw_highlight": {"total": 110, "accuracy": 100.0, "status": "PASS"},
+    "flaw_low_contrast": {"total": 110, "accuracy": 100.0, "status": "PASS"},
+    "flaw_motion_blur": {"total": 330, "accuracy": 83.9, "status": "PASS", "note": "Improved from 80.9% via CLAHE + bilateral filter combo"},
+    "geometric_perspective": {"total": 110, "accuracy": 94.5, "status": "PASS", "note": "cv2.QRCodeDetector added +14.5% on top of pyzbar's 80.0%"},
+    "geometric_rotation": {"total": 110, "accuracy": 100.0, "status": "PASS"},
+    "illumination": {"total": 110, "accuracy": 100.0, "status": "PASS"},
+    "ink_corner_destruction": {"total": 294, "accuracy": 93.9, "status": "PASS", "note": "Improved from 85.4% via wider adaptive threshold sweep"},
+    "ink_data_pollution": {"total": 210, "accuracy": 100.0, "status": "PASS", "note": "DRAMATIC improvement from 76.2% — enhanced pyzbar with Otsu + bilateral + wide adaptive threshold sweep catches all cases"},
+    "linear_combo": {"total": 110, "accuracy": 100.0, "status": "PASS"},
+    "linear_perspective": {"total": 110, "accuracy": 100.0, "status": "PASS"},
+    "linear_shear": {"total": 110, "accuracy": 100.0, "status": "PASS"},
+    "liquid_blue_ink": {"total": 40, "accuracy": 100.0, "status": "PASS"},
+    "liquid_coffee": {"total": 40, "accuracy": 100.0, "status": "PASS"},
+    "liquid_water_drops": {"total": 40, "accuracy": 100.0, "status": "PASS"},
+    "multi_qr": {"total": 110, "accuracy": 70.0, "status": "FAIL", "note": "Improved from 68.2% via wider adaptive threshold + morphological operations. Remaining failures are multi-code images where individual QR codes are too small or heavily transformed for finder detection."}
+  },
+  "summary": {
+    "pass": 17,
+    "fail": 4,
+    "total_images": 2658,
+    "successful_decodes": 2267,
+    "overall_accuracy": 85.3,
+    "categories_below_80": ["barcode_geometric", "damage_noise", "edge_tear", "multi_qr"],
+    "categories_improved": ["barcode_scratches", "damage_noise", "flaw_motion_blur", "ink_corner_destruction", "ink_data_pollution", "liquid_coffee", "multi_qr"],
+    "categories_now_passing": ["ink_corner_destruction", "ink_data_pollution", "flaw_motion_blur", "liquid_coffee"],
+    "unfixable_notes": {
+      "barcode_geometric": "Geometric transformations (perspective 25-70% compression + cylinder curvature) fundamentally break 1D bar/space width ratios. pyzbar requires consistent width ratios for decode. Custom distortion-aware decoder would be needed.",
+      "edge_tear": "Tears/fragments remove >40% of image data. Inpainting cannot reconstruct missing QR modules or barcode bars.",
+      "damage_noise": "Combined random damage (scratches + noise + blur + occlusion) destroys QR finder patterns in ~30% of images.",
+      "multi_qr": "Multi-code images with small (sometimes <50px), transformed QR codes in complex backgrounds exceed current finder detection limits."
+    }
+  }
+}

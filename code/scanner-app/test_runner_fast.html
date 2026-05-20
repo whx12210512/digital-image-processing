@@ -1,0 +1,43 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fast Test (no html5-qrcode)</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+</head><body><pre id="log"></pre><script>
+const L=document.getElementById('log');function log(m){L.textContent+=m+'\n';}
+
+function blankRegion(d,w,h,l){
+    const m=10,x1=Math.max(0,Math.floor(Math.min(l.topLeftCorner.x,l.bottomLeftCorner.x))-m),y1=Math.max(0,Math.floor(Math.min(l.topLeftCorner.y,l.topRightCorner.y))-m),x2=Math.min(w,Math.ceil(Math.max(l.topRightCorner.x,l.bottomRightCorner.x))+m),y2=Math.min(h,Math.ceil(Math.max(l.bottomLeftCorner.y,l.bottomRightCorner.y))+m);
+    for(let y=y1;y<y2;y++)for(let x=x1;x<x2;x++){const i=(y*w+x)*4;d[i]=d[i+1]=d[i+2]=d[i+3]=255;}
+}
+function gsEnhance(d){const o=new Uint8ClampedArray(d.length);let lo=255,hi=0;for(let i=0;i<d.length;i+=4){const g=Math.round(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114);o[i]=o[i+1]=o[i+2]=g;o[i+3]=255;if(g<lo)lo=g;if(g>hi)hi=g;}const r=hi-lo||1;for(let i=0;i<o.length;i+=4){o[i]=o[i+1]=o[i+2]=Math.round(((o[i]-lo)/r)*255);}return{data:o,width:d.width,height:d.height};}
+function inv(d){const o=new Uint8ClampedArray(d.length);for(let i=0;i<d.length;i+=4){o[i]=255-d[i];o[i+1]=255-d[i+1];o[i+2]=255-d[i+2];o[i+3]=d[i+3];}return o;}
+function safeJsQR(d,w,h){try{return jsQR(d,w,h,{inversionAttempts:'dontInvert'});}catch(e){return null;}}
+function scanIter(d,w,h,n){const out=[],data=new Uint8ClampedArray(d);while(n-->0){const q=safeJsQR(data,w,h);if(!q||!q.data)break;out.push(q.data);blankRegion(data,w,h,q.location);}return out;}
+
+async function decodeOne(url){
+    try{
+        const resp=await fetch(url);if(!resp.ok)return-1;
+        const blob=await resp.blob();
+        const file=new File([blob],url.split('/').pop(),{type:blob.type||'image/png'});
+        const img=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>{const i=new Image();i.onload=()=>resolve(i);i.onerror=reject;i.src=r.result;};r.onerror=reject;r.readAsDataURL(file);});
+        const c=document.createElement('canvas');c.width=img.width;c.height=img.height;
+        const ctx=c.getContext('2d');ctx.drawImage(img,0,0);
+        const idata=ctx.getImageData(0,0,c.width,c.height);
+        const w=idata.width,h=idata.height;
+        const merged=[];
+        // BarcodeDetector with 3-level fallback
+        if('BarcodeDetector' in window){
+            let detected=[];
+            try{detected=await new BarcodeDetector({formats:['qr_code','ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']}).detect(c);}
+            catch(e1){try{const sup=await BarcodeDetector.getSupportedFormats();const fm=['qr_code','ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf'].filter(f=>sup.includes(f));if(fm.length)detected=await new BarcodeDetector({formats:fm}).detect(c);}catch(e2){try{detected=await new BarcodeDetector({formats:['qr_code']}).detect(c);}catch(e3){}}}
+            for(const b of detected){merged.push(b.rawValue);}
+        }
+        // jsQR passes
+        const e=gsEnhance(idata);
+        for(const t of scanIter(e.data,w,h,25)){if(!merged.includes(t))merged.push(t);}
+        for(const t of scanIter(idata.data,w,h,25)){if(!merged.includes(t))merged.push(t);}
+        for(const t of scanIter(inv(e.data),w,h,15)){if(!merged.includes(t))merged.push(t);}
+        return merged.length;
+    }catch(e){return -1;}
+}
+window.decodeOne=decodeOne;
+log('Fast test ready (BD+jsQR only). BD: '+('BarcodeDetector' in window));
+</script></body></html>
