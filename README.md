@@ -65,70 +65,38 @@
 
 ### Web 扫描应用
 
-> **重要**: 浏览器摄像头 API (`getUserMedia`) 仅限**安全上下文**（HTTPS 或 localhost）。
-> 手机通过局域网 IP 访问必须使用 HTTPS，否则会提示"权限不足"。
+> **重要**: 摄像头需要 **HTTPS 或 localhost** 才能调用。所有在线方式均已满足此要求。
 
-#### 方式一：HTTPS 本地服务器（推荐，手机/电脑均可）
+#### 手机用户 (推荐)
+
+| 方式 | 适用场景 | 链接 |
+|------|----------|------|
+| **在线版** | 有网络, 无需安装, 支持 PWA 添加到桌面 | [Netlify 在线版](https://clever-torrone-2cb8c8.netlify.app) |
+| **APK 安装** | 无 Google 服务 (荣耀/小米), 离线使用 | [GitHub Releases](https://github.com/whx12210512/digital-image-processing/releases/latest) |
+
+> **注意**: 在线版若界面与 APK 不一致, 说明浏览器缓存了旧版 Service Worker。
+> 解决方法: 浏览器中打开 DevTools → Application → Service Workers → Unregister,
+> 或在地址栏后加 `?v=2` 强制刷新, 或清除浏览器缓存后重新打开。
+
+#### 开发者
 
 ```bash
+# 本地 HTTPS 调试 (手机+电脑均可)
 cd code/scanner-app
-
-# 1. 生成自签名证书（仅首次）
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
-  -days 365 -nodes -subj "//CN=<你的IP地址>"
-
-# 2. 启动 HTTPS 服务器
+  -days 365 -nodes -subj "//CN=$(hostname -I | awk '{print $1}')"
 python server_https.py
-```
+# → 电脑: https://localhost:8443  手机: https://<电脑IP>:8443
 
-电脑浏览器访问 `https://localhost:8443`，手机访问 `https://<电脑IP>:8443`。
-
-首次访问时浏览器会提示证书不受信任，点击"高级 → 继续访问"即可。
-
-> Windows 用户需额外放行防火墙端口:
-> ```bash
-> netsh advfirewall firewall add rule name="Scanner HTTPS 8443" dir=in action=allow protocol=TCP localport=8443
-> ```
-
-#### 方式二：HTTP 本地调试（仅电脑浏览器）
-
-```bash
-cd code/scanner-app
+# 快速 HTTP 调试 (仅电脑, localhost 可调摄像头)
 python -m http.server 8000
-# 浏览器打开 http://localhost:8000
+# → http://localhost:8000
+
+# 构建 APK
+npm install && npx cap sync android && cd android && ./gradlew assembleDebug
 ```
 
-> `localhost` 被视为安全上下文，摄像头可正常使用。但手机通过 IP 访问 `http://<IP>:8000` 会因非 HTTPS 而无法调用摄像头。
-
-#### 方式三：PWA / Netlify 在线版（推荐，手机/电脑均可，无需安装）
-
-直接浏览器打开即用，支持 PWA 添加到桌面：
-
-```
-https://clever-torrone-2cb8c8.netlify.app
-```
-
-Chrome/Edge 打开后 → 菜单 → **"添加到主屏幕"** → 桌面出现独立 App 图标，全屏运行。
-
-#### 方式四：Android APK（荣耀/小米等无 Google 服务的手机）
-
-下载安装 APK，内置 WebView 加载扫码页面，不依赖 Google Play Services：
-
-```
-https://github.com/whx12210512/digital-image-processing/releases/latest
-```
-
-> 自行构建 APK:
-> ```bash
-> npm install                      # 仅首次
-> npx cap sync android             # 同步 web 资源
-> cd android && ./gradlew assembleDebug
-> # APK 输出: android/app/build/outputs/apk/debug/app-debug.apk
-> ```
-
-#### 方式五：直接打开文件（不支持摄像头）
-
-双击 `code/scanner-app/index.html` 在浏览器中打开，可使用**图片上传识别**功能，但无法使用摄像头扫码。
+### Python Pipeline
 
 ### Python Pipeline
 ```bash
