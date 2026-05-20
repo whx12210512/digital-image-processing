@@ -219,6 +219,8 @@ def generate_ink_mask(shape, num_blots=None, coverage=None,
     mask = np.zeros((h, w), dtype=np.uint8)
 
     if num_blots is None:
+        # Scattered mode: many small blobs → RS can recover
+        # Large mode: few big blobs → tests continuous damage
         num_blots = random.randint(3, 12)
 
     # 计算可用区域 (非定位符区) 的中心候选点
@@ -228,6 +230,16 @@ def generate_ink_mask(shape, num_blots=None, coverage=None,
             for fy in range(y1, y2, 4):  # 步进采样，加速
                 for fx in range(x1, x2, 4):
                     forbidden.add((fx, fy))
+
+    # Determine blob radius: scattered mode uses tiny fixed blobs for RS recoverability
+    if avoid_boxes is not None and target_boxes is None:
+        # Data pollution: many tiny scattered blobs (1-4px) → RS can recover
+        # Each blob = ~3-50px², at 30% coverage ≈ thousands of blobs
+        num_blots = random.randint(200, 600)
+        radius_range = (1, 4)
+    else:
+        # Corner destruction / general mode: fewer large blobs
+        radius_range = (int(min(w, h) * 0.04), int(min(w, h) * 0.18))
 
     # 生成墨团
     for i in range(num_blots):
@@ -255,7 +267,7 @@ def generate_ink_mask(shape, num_blots=None, coverage=None,
             cx = random.randint(box[0], box[2])
             cy = random.randint(box[1], box[3])
 
-        radius = random.randint(int(min(w, h) * 0.04), int(min(w, h) * 0.18))
+        radius = random.randint(*radius_range)
         irregularity = random.uniform(0.15, 0.55)
 
         blot = generate_ink_splotch(shape, cx, cy, radius, irregularity)
@@ -304,7 +316,7 @@ def generate_data_pollution_image(index, coverage_level=None):
         (filename, numpy BGR image)
     """
     if coverage_level is None:
-        coverage_level = random.choice([0.10, 0.20, 0.30])
+        coverage_level = random.choice([0.08, 0.16, 0.24])
 
     data = random_qr_data()
     qr_img, ecc = generate_qr_image(data)
@@ -324,9 +336,9 @@ def generate_data_pollution_image(index, coverage_level=None):
     # Apply pure black ink (simulates real ink/photocopy smudge)
     qr_img[ink_mask > 0] = (0, 0, 0)
 
-    # 文件名编码覆盖率
-    level_str = f"{int(coverage_level*100):02d}"
-    fname = f"data_pollution_{index:04d}_cov{level_str}.png"
+    # 文件名编码覆盖率 (乘以100取整)
+    cov_pct = int(round(coverage_level * 100))
+    fname = f"data_pollution_{index:04d}_cov{cov_pct:02d}.png"
     return fname, qr_img
 
 
@@ -527,14 +539,14 @@ def main():
 
     print("=" * 60)
     print("  墨水污染 QR 码压力测试数据集生成器")
-    print(f"  Task A 数据区污染: {data_total} 张 (10%/20%/30% 各 {per_level})")
+    print(f"  Task A 数据区污染: {data_total} 张 (8%/16%/24% 各 {per_level})")
     print(f"  Task B 定位符毁灭: {max(args.corner_count, 110)} 张")
     print(f"  输出目录: {root}")
     print("=" * 60)
 
     if not args.no_data:
         wrapper = DataPollutionWrapper(
-            counts_per_level={0.10: per_level, 0.20: per_level, 0.30: per_level}
+            counts_per_level={0.08: per_level, 0.16: per_level, 0.24: per_level}
         )
         batch_generate(
             wrapper.generate,
