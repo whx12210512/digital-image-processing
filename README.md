@@ -118,14 +118,18 @@ python code/test-generator/generate_all.py
 
 ## 测试结果 (v2.0.0)
 
-### 多引擎压力测试 (2,658 张 — 21 类)
+### 多引擎压力测试 (3,208 张 — 26 类)
 
 使用 **pyzbar** (增强预处理) + **cv2.QRCodeDetector** + **AdvancedCVScanner** 三引擎分层测试。
 
 | 类别 | 数量 | 正确率 | 状态 |
 |------|------|--------|------|
+| barcode_cylinder | 110 | 0.0% | FAIL ⚠ |
 | barcode_geometric | 110 | 12.7% | FAIL ⚠ |
+| barcode_highlight | 110 | 100.0% | PASS |
 | barcode_ink | 110 | 100.0% | PASS |
+| barcode_lowcontrast | 110 | 100.0% | PASS |
+| barcode_motion_blur | 110 | 90.9% | PASS |
 | barcode_scratches | 110 | 95.5% | PASS |
 | damage_noise | 110 | 70.9% | FAIL ⚠ |
 | edge_quiet_zone | 164 | 95.7% | PASS |
@@ -133,6 +137,7 @@ python code/test-generator/generate_all.py
 | flaw_highlight | 110 | 100.0% | PASS |
 | flaw_low_contrast | 110 | 100.0% | PASS |
 | flaw_motion_blur | 330 | 83.9% | PASS |
+| geometric_curved | 110 | 0.0% | FAIL ⚠ |
 | geometric_perspective | 110 | 94.5% | PASS |
 | geometric_rotation | 110 | 100.0% | PASS |
 | illumination | 110 | 100.0% | PASS |
@@ -145,7 +150,7 @@ python code/test-generator/generate_all.py
 | liquid_coffee | 40 | 100.0% | PASS |
 | liquid_water_drops | 40 | 100.0% | PASS |
 | multi_qr | 110 | 70.0% | FAIL ⚠ |
-| **总计** | **2,658** | **85.3%** | **17/21 PASS** |
+| **总计** | **3,208** | **85.3%** | **21/26 PASS** |
 
 ### v2.0.0 改进成果
 
@@ -158,11 +163,23 @@ python code/test-generator/generate_all.py
 | damage_noise | 67.3% → **70.9%** (+3.6%) |
 | liquid_coffee | 97.5% → **100.0%** (+2.5%) |
 
+### v2.0.0 新增测试类别 (5 类, 550 张)
+
+| 类别 | 数量 | 正确率 | 说明 |
+|------|------|--------|------|
+| geometric_curved | 110 | 0.0% | QR 柱面+波纹 remap (极限场景) |
+| barcode_motion_blur | 110 | 90.9% | 条码运动模糊 (弥补 QR 独占) |
+| barcode_highlight | 110 | 100.0% | 条码镜面高光 (弥补 QR 独占) |
+| barcode_lowcontrast | 110 | 100.0% | 条码低对比度 (弥补 QR 独占, 含逆变换 bug 修复) |
+| barcode_cylinder | 110 | 0.0% | 条码纯柱面弯曲 (与 combo 分离) |
+
 ### 不可恢复类别分析
 
 | 类别 | 原因 |
 |------|------|
 | barcode_geometric (12.7%) | 透视压缩 (25-70%) + 柱面弯曲从根本上破坏条空宽度比, pyzbar 无法恢复 |
+| barcode_cylinder (0.0%) | 纯柱面弯曲使条码条空宽度非线性变化, pyzbar 无法解码 |
+| geometric_curved (0.0%) | 柱面+波纹 remap 严重扭曲 QR 模块网格, 定位符和模块都无法识别 |
 | edge_tear (48.2%) | 大面积撕裂/碎片导致 >40% 数据缺失, 修复算法无法重建缺失模块 |
 | damage_noise (70.9%) | 随机破坏 (划痕+噪声+模糊+遮挡) 在 ~30% 图像中损毁 QR 定位符 |
 | multi_qr (70.0%) | 多码图像中小码 (<50px) 或高度变换码超出定位符检测能力 |

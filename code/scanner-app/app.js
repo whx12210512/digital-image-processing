@@ -25,34 +25,39 @@ const BARCODE_FORMATS = [
     'codabar', 'itf', 'rss_14', 'rss_expanded',
 ];
 
-// ============ Stress Test Gallery — one sample per category (21 types) ============
+// ============ Stress Test Gallery — one sample per category (26 types) ============
 const TEST_IMAGES = [
-    // QR geometric distortions
+    // QR geometric distortions (6)
     { src: 'test_images/stress_test/geometric_perspective_perspective_0000.png', label: 'QR 透视畸变' },
     { src: 'test_images/stress_test/geometric_rotation_rotation_0000_a022.png', label: 'QR 旋转变换' },
+    { src: 'test_images/stress_test/geometric_curved_curved_combo_0008.png', label: 'QR 柱面/波纹' },
     { src: 'test_images/stress_test/linear_perspective_linear_persp_0000.png', label: 'QR 线性透视' },
     { src: 'test_images/stress_test/linear_shear_linear_shear_0000.png', label: 'QR 线性剪切' },
     { src: 'test_images/stress_test/linear_combo_linear_combo_0000.png', label: 'QR 复合几何' },
-    // QR image quality flaws
+    // QR image quality flaws (4)
     { src: 'test_images/stress_test/flaw_motion_blur_motionblur_0000_l05_a012.png', label: 'QR 运动模糊' },
     { src: 'test_images/stress_test/flaw_highlight_highlight_0000.png', label: 'QR 镜面反光' },
     { src: 'test_images/stress_test/flaw_low_contrast_lowcontrast_0000_m083_p227.png', label: 'QR 低对比度' },
     { src: 'test_images/stress_test/illumination_illumination_0000.png', label: 'QR 光照不均' },
-    // QR physical damage
+    // QR physical damage (4)
     { src: 'test_images/stress_test/damage_noise_damage_0000.png', label: 'QR 物理污损' },
     { src: 'test_images/stress_test/ink_corner_destruction_corner_dual_0001.png', label: 'QR 角部墨迹' },
     { src: 'test_images/stress_test/ink_data_pollution_data_pollution_0000_cov08.png', label: 'QR 数据区污染' },
     { src: 'test_images/stress_test/edge_quiet_zone_qz_0000_bc.png', label: 'QR 静区侵犯' },
     { src: 'test_images/stress_test/edge_tear_tear_0000_bc.png', label: 'QR 撕裂碎片' },
-    // Liquid stains
+    // Liquid stains (3)
     { src: 'test_images/stress_test/liquid_blue_ink_blueink_0000.png', label: 'QR 蓝色墨水' },
     { src: 'test_images/stress_test/liquid_coffee_coffee_0000.png', label: 'QR 咖啡污渍' },
     { src: 'test_images/stress_test/liquid_water_drops_waterdrop_0000.png', label: 'QR 水滴折射' },
-    // Barcode stress
+    // Barcode stress (7)
     { src: 'test_images/stress_test/barcode_geometric_barcode_geo_combo_0002_CODE128.png', label: '条码 几何畸变' },
     { src: 'test_images/stress_test/barcode_ink_barcode_ink_fatal_0000_EAN8.png', label: '条码 墨水污染' },
     { src: 'test_images/stress_test/barcode_scratches_barcode_scratches_0000_EAN13.png', label: '条码 物理划痕' },
-    // Multi-code
+    { src: 'test_images/stress_test/barcode_motion_blur_barcode_mblur_0000_CODE128.png', label: '条码 运动模糊' },
+    { src: 'test_images/stress_test/barcode_highlight_barcode_highlight_0000_CODE39.png', label: '条码 镜面高光' },
+    { src: 'test_images/stress_test/barcode_lowcontrast_barcode_lowcontrast_0000_CODE128.png', label: '条码 低对比度' },
+    { src: 'test_images/stress_test/barcode_cylinder_barcode_cylinder_0000_CODE128.png', label: '条码 柱面弯曲' },
+    // Multi-code (1)
     { src: 'test_images/stress_test/multi_qr_multi_qr_0000.jpg', label: '多码同框' },
 ];
 

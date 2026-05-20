@@ -576,6 +576,95 @@ class InkWrapper:
             return generate_ink_fatal(index - self.total // 2)
 
 
+# ============================================================================
+# Task D: 运动模糊 (Motion Blur)
+# ============================================================================
+
+def motion_blur_kernel(length, angle_deg):
+    kernel = np.zeros((length, length), dtype=np.float32)
+    center = length // 2
+    angle_rad = np.deg2rad(angle_deg)
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    for i in range(length):
+        dx = int(center + (i - center) * cos_a)
+        dy = int(center + (i - center) * sin_a)
+        if 0 <= dx < length and 0 <= dy < length:
+            kernel[dy, dx] = 1.0
+    kernel /= kernel.sum()
+    return kernel
+
+
+def generate_motion_blur_image(index):
+    img, bc_type, data = generate_valid_barcode()
+    length = random.choice([7, 9, 11, 13, 15])
+    angle = random.uniform(0, 180)
+    kernel = motion_blur_kernel(length, angle)
+    blurred = cv2.filter2D(img, -1, kernel)
+    fname = f"barcode_mblur_{index:04d}_{bc_type.upper()}.png"
+    return fname, blurred
+
+
+# ============================================================================
+# Task E: 镜面高光 (Specular Highlight)
+# ============================================================================
+
+def generate_highlight_image(index):
+    img, bc_type, data = generate_valid_barcode()
+    h, w = img.shape[:2]
+    result = img.astype(np.float32)
+    num_spots = random.randint(1, 3)
+    for _ in range(num_spots):
+        cx = random.randint(w // 6, 5 * w // 6)
+        cy = random.randint(h // 4, 3 * h // 4)
+        rx = random.randint(30, 80)
+        ry = random.randint(20, 50)
+        angle = random.uniform(0, 360)
+        mask = np.zeros((h, w), dtype=np.float32)
+        cv2.ellipse(mask, (cx, cy), (rx, ry), angle, 0, 360, 1.0, -1)
+        mask = cv2.GaussianBlur(mask, (31, 31), 15)
+        intensity = random.uniform(0.3, 0.7)
+        for c in range(3):
+            result[:, :, c] = result[:, :, c] * (1 - mask * intensity) + 255 * mask * intensity
+    result = np.clip(result, 0, 255).astype(np.uint8)
+    fname = f"barcode_highlight_{index:04d}_{bc_type.upper()}.png"
+    return fname, result
+
+
+# ============================================================================
+# Task F: 低对比度 (Low Contrast)
+# ============================================================================
+
+def generate_lowcontrast_image(index):
+    img, bc_type, data = generate_valid_barcode()
+    h, w = img.shape[:2]
+    fade_level = random.randint(60, 140)
+    paper_darken = random.randint(180, 235)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    ratio = gray / 255.0
+    # Keep black bars dark, white background light
+    new_gray = fade_level + (paper_darken - fade_level) * ratio
+    new_gray = np.clip(new_gray, 0, 255).astype(np.uint8)
+    result = cv2.cvtColor(new_gray, cv2.COLOR_GRAY2BGR)
+    fname = f"barcode_lowcontrast_{index:04d}_{bc_type.upper()}.png"
+    return fname, result
+
+
+# ============================================================================
+# Task G: 柱面弯曲 (Cylinder Warp — dedicated)
+# ============================================================================
+
+def generate_cylinder_image(index):
+    img, bc_type, data = generate_valid_barcode()
+    curvature = random.uniform(0.3, 0.9)
+    result = apply_cylinder_warp_horizontal(img, curvature)
+    fname = f"barcode_cylinder_{index:04d}_{bc_type.upper()}.png"
+    return fname, result
+
+
+# ============================================================================
+# 主入口
+# ============================================================================
+
 def main():
     parser = argparse.ArgumentParser(
         description='一维条形码压力测试数据集生成器')
@@ -590,6 +679,14 @@ def main():
                         help='跳过 Task B 物理划痕')
     parser.add_argument('--no-geometric', action='store_true',
                         help='跳过 Task C 几何畸变')
+    parser.add_argument('--no-blur', action='store_true',
+                        help='跳过 Task D 运动模糊')
+    parser.add_argument('--no-highlight', action='store_true',
+                        help='跳过 Task E 镜面高光')
+    parser.add_argument('--no-lowcontrast', action='store_true',
+                        help='跳过 Task F 低对比度')
+    parser.add_argument('--no-cylinder', action='store_true',
+                        help='跳过 Task G 柱面弯曲')
     parser.add_argument('--no-parallel', action='store_true',
                         help='禁用多线程')
     args = parser.parse_args()
@@ -598,7 +695,6 @@ def main():
     count = max(args.count, 100)
     parallel = not args.no_parallel
 
-    # 确保总数偶数 (Task A 各半)
     ink_count = (count // 2) * 2
 
     print("=" * 60)
@@ -606,6 +702,10 @@ def main():
     print(f"  Task A 墨水污染: {ink_count} 张 (可恢复/致命各 {ink_count // 2})")
     print(f"  Task B 物理划痕: {count} 张")
     print(f"  Task C 几何畸变: {count} 张")
+    print(f"  Task D 运动模糊: {count} 张")
+    print(f"  Task E 镜面高光: {count} 张")
+    print(f"  Task F 低对比度: {count} 张")
+    print(f"  Task G 柱面弯曲: {count} 张")
     print(f"  输出目录: {root}")
     print("=" * 60)
 
@@ -629,6 +729,34 @@ def main():
                        os.path.join(root, 'barcode_geometric'),
                        count,
                        'Task C: 透视 + 柱面弯曲',
+                       parallel=parallel)
+
+    if not args.no_blur:
+        batch_generate(generate_motion_blur_image,
+                       os.path.join(root, 'barcode_motion_blur'),
+                       count,
+                       'Task D: 运动模糊',
+                       parallel=parallel)
+
+    if not args.no_highlight:
+        batch_generate(generate_highlight_image,
+                       os.path.join(root, 'barcode_highlight'),
+                       count,
+                       'Task E: 镜面高光',
+                       parallel=parallel)
+
+    if not args.no_lowcontrast:
+        batch_generate(generate_lowcontrast_image,
+                       os.path.join(root, 'barcode_lowcontrast'),
+                       count,
+                       'Task F: 低对比度',
+                       parallel=parallel)
+
+    if not args.no_cylinder:
+        batch_generate(generate_cylinder_image,
+                       os.path.join(root, 'barcode_cylinder'),
+                       count,
+                       'Task G: 柱面弯曲',
                        parallel=parallel)
 
     print(f"\n{'='*60}")
