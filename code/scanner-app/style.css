@@ -28,6 +28,26 @@ html, body {
     -webkit-tap-highlight-color: transparent;
     -webkit-user-select: none;
     user-select: none;
+
+/* === Version Badge === */
+.splash-version {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 2px 10px;
+    font-size: 12px;
+    color: rgba(255,255,255,0.7);
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 10px;
+    letter-spacing: 1px;
+}
+.header-version {
+    font-size: 11px;
+    color: rgba(255,255,255,0.65);
+    background: rgba(255,255,255,0.15);
+    padding: 1px 8px;
+    border-radius: 8px;
+    margin-left: 6px;
+}
 }
 
 /* === Splash Screen === */

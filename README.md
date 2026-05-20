@@ -71,8 +71,8 @@
 
 | 方式 | 适用场景 | 链接 |
 |------|----------|------|
-| **在线版** | 有网络, 无需安装, 支持 PWA 添加到桌面 | [Netlify 在线版](https://clever-torrone-2cb8c8.netlify.app) |
-| **APK 安装** | 无 Google 服务 (荣耀/小米), 离线使用 | [GitHub Releases](https://github.com/whx12210512/digital-image-processing/releases/latest) |
+| **在线版** | 有网络, 无需安装, 支持 PWA 添加到桌面 | [Netlify 在线版](https://clever-torrone-2cb8c8.netlify.app) <br> `https://clever-torrone-2cb8c8.netlify.app` |
+| **APK 安装** | 无 Google 服务 (荣耀/小米), 离线使用 | [GitHub Releases](https://github.com/whx12210512/digital-image-processing/releases/latest) <br> `https://github.com/whx12210512/digital-image-processing/releases/latest` |
 
 > **注意**: 在线版若界面与 APK 不一致, 说明浏览器缓存了旧版 Service Worker。
 > 解决方法: 浏览器中打开 DevTools → Application → Service Workers → Unregister,
