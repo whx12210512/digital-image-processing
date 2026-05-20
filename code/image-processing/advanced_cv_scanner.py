@@ -403,6 +403,63 @@ class AdvancedRestoration:
 
 
 # ============================================================================
+# 模块 5: 颜色污渍去除 (Color Stain Remover)
+# ============================================================================
+
+class ColorStainRemover:
+    """
+    检测并去除半透明彩色污渍（咖啡渍/蓝色墨水）。
+
+    算法:
+        1. 分析 RGB 通道比值:
+           - 褐色 (咖啡): R >> B, G 居中 → 检测 (R-B) > threshold 区域
+           - 蓝色 (墨水): B >> R, G 居中 → 检测 (B-R) > threshold 区域
+        2. 对检测到的污渍区域做白化 + 自适应二值化复原
+        3. 形态学微调消除残余伪影
+    """
+
+    @staticmethod
+    def remove_stains(bgr):
+        """
+        自动检测并移除彩色污渍。
+
+        步骤:
+            1. 分离 BGR 通道
+            2. 褐色检测: mask_brown = ((R - B) > 35) & (G > 50)
+            3. 蓝色检测: mask_blue  = ((B - R) > 35) & (G < 200)
+            4. 合并蒙版 → 对该区域做自适应二值化复原
+        """
+        B = bgr[:, :, 0].astype(np.float32)
+        G = bgr[:, :, 1].astype(np.float32)
+        R = bgr[:, :, 2].astype(np.float32)
+
+        h, w = bgr.shape[:2]
+
+        # 褐色检测: R 显著大于 B 且偏暖色
+        brown_mask = ((R - B) > 35) & (G > 50) & (R > 80)
+
+        # 蓝色检测: B 显著大于 R 且偏冷色
+        blue_mask = ((B - R) > 35) & (G < 200) & (B > 80)
+
+        stain_mask = brown_mask | blue_mask
+
+        if np.count_nonzero(stain_mask) < h * w * 0.01:
+            return bgr  # 污渍面积太小, 跳过
+
+        # 对被污染区域做白化处理
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                        cv2.THRESH_BINARY, 11, 3)
+
+        result = bgr.copy()
+        # 被污染区域: 用二值化结果替换
+        for c in range(3):
+            ch = result[:, :, c]
+            ch[stain_mask] = 255 - binary[stain_mask]  # 白底黑码
+        return result
+
+
+# ============================================================================
 # 高级 CV 扫描器主类 v1.1.0
 # ============================================================================
 
@@ -421,6 +478,7 @@ class AdvancedCVScanner:
         self.unwarper = CylindricalUnwarper()
         self.cropper = MultiROICropper()
         self.restorer = AdvancedRestoration()
+        self.stain_remover = ColorStainRemover()
 
     def classify_damage(self, gray):
         issues = []
@@ -545,6 +603,12 @@ class AdvancedCVScanner:
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             enhanced = clahe.apply(gray)
             variants.append(('clahe', cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)))
+        except: pass
+
+        # ---- V7: 颜色污渍去除 (咖啡/蓝墨水) ----
+        try:
+            cleaned = self.stain_remover.remove_stains(bgr)
+            variants.append(('stain_free', cleaned))
         except: pass
 
         # ---- 解码所有变体 ----
