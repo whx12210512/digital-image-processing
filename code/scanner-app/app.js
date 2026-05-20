@@ -475,6 +475,63 @@ async function decodeImageFile(file, scanFormat) {
         insertUnique(merged, scanQrIterative(inverted(imageData.data), w, h, 'jsQR (raw inv)', 15));
     }
 
+    // ====== Speckle removal: morphological opening to clear 1-4px ink dots ======
+    if (wantQr) {
+        try {
+            const specCanvas = document.createElement('canvas');
+            specCanvas.width = w; specCanvas.height = h;
+            const specCtx = specCanvas.getContext('2d');
+            specCtx.putImageData(imageData, 0, 0);
+            // Get pixel data, do opening (erode->dilate) manually
+            const specData = specCtx.getImageData(0, 0, w, h);
+            const gray = new Uint8ClampedArray(w * h);
+            for (let i = 0; i < specData.data.length; i += 4) {
+                gray[i >> 2] = Math.round(specData.data[i] * 0.299 + specData.data[i + 1] * 0.587 + specData.data[i + 2] * 0.114);
+            }
+            // Simple binary threshold
+            const binary = new Uint8ClampedArray(w * h);
+            for (let i = 0; i < gray.length; i++) binary[i] = gray[i] < 128 ? 0 : 255;
+            // Erode: if any neighbor is white, become white (remove small black dots)
+            const eroded = new Uint8ClampedArray(w * h);
+            for (let y = 1; y < h - 1; y++) {
+                for (let x = 1; x < w - 1; x++) {
+                    const idx = y * w + x;
+                    if (binary[idx] === 0) {
+                        let hasWhite = false;
+                        for (let dy = -1; dy <= 1; dy++)
+                            for (let dx = -1; dx <= 1; dx++)
+                                if (binary[(y + dy) * w + (x + dx)] === 255) hasWhite = true;
+                        eroded[idx] = hasWhite ? 255 : 0;
+                    } else eroded[idx] = 255;
+                }
+            }
+            // Dilate: if any neighbor is black, become black (restore module edges)
+            const dilated = new Uint8ClampedArray(w * h);
+            for (let y = 1; y < h - 1; y++) {
+                for (let x = 1; x < w - 1; x++) {
+                    const idx = y * w + x;
+                    if (eroded[idx] === 255) {
+                        let hasBlack = false;
+                        for (let dy = -1; dy <= 1; dy++)
+                            for (let dx = -1; dx <= 1; dx++)
+                                if (eroded[(y + dy) * w + (x + dx)] === 0) hasBlack = true;
+                        dilated[idx] = hasBlack ? 0 : 255;
+                    } else dilated[idx] = 0;
+                }
+            }
+            // Apply to enhanced data and scan
+            const cleanedData = new Uint8ClampedArray(w * h * 4);
+            for (let i = 0; i < dilated.length; i++) {
+                const val = dilated[i];
+                cleanedData[i * 4] = val;
+                cleanedData[i * 4 + 1] = val;
+                cleanedData[i * 4 + 2] = val;
+                cleanedData[i * 4 + 3] = 255;
+            }
+            insertUnique(merged, scanQrIterative(cleanedData, w, h, 'jsQR(speckle)', 25));
+        } catch (e) { /* speckle filter failed */ }
+    }
+
     // ====== Finder-pattern repair: detect and fix ink-damaged corners ======
     if (wantQr && merged.length < 2) {
         try {
