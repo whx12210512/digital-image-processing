@@ -602,6 +602,79 @@ class MotionDeblurrer:
 
 
 # ============================================================================
+# 模块 8: 撕裂修复 (Tear Inpainter)
+# ============================================================================
+
+class TearInpainter:
+    """
+    使用图像修复 (Inpainting) 填充撕裂/缺失区域。
+
+    数学原理:
+        cv2.inpaint 使用 Navier-Stokes 流体动力学方程或
+        Fast Marching Method, 从破损区域边界向内部传播像素值,
+        保持等照度线(isophotes)的连续性。
+
+    撕裂检测:
+        大块纯白区域 (RGB=255) + 周围有正常内容 → 判定为撕裂
+        排除: 整个图像本来就是白底的正常区域
+    """
+
+    @staticmethod
+    def detect_tear_mask(gray):
+        """检测撕裂/缺失区域 (大面积纯白块)。"""
+        h, w = gray.shape
+        # 纯白区域
+        white_mask = (gray > 250).astype(np.uint8) * 255
+
+        # 只保留大块白区 (小面积是正常间隙)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        cleaned = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel)
+
+        # 只保留连通区域 > 500px² (排除正常的白底)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            cleaned, connectivity=8)
+        tear_mask = np.zeros_like(cleaned)
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area > 500:
+                tear_mask[labels == i] = 255
+
+        # 排除边缘正常白色区域 (整行/整列全白通常是空白边距)
+        row_white = np.mean(tear_mask, axis=1)
+        col_white = np.mean(tear_mask, axis=0)
+        for y in range(h):
+            if row_white[y] > 240:
+                tear_mask[y, :] = 0
+        for x in range(w):
+            if col_white[x] > 240:
+                tear_mask[:, x] = 0
+
+        return tear_mask
+
+    @staticmethod
+    def inpaint_tears(bgr):
+        """
+        检测并修复撕裂区域。
+
+        步骤:
+            1. 检测大面积白色异常块
+            2. cv2.inpaint 基于邻域修复
+            3. 如果撕裂面积 >60% 则跳过 (无法修复)
+        """
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        tear_mask = TearInpainter.detect_tear_mask(gray)
+
+        tear_ratio = np.count_nonzero(tear_mask) / gray.size
+        if tear_ratio < 0.01 or tear_ratio > 0.6:
+            return bgr  # 太少或太多撕裂, 跳过
+
+        # Navier-Stokes inpainting (保持等照度线连续性)
+        inpainted = cv2.inpaint(bgr, tear_mask, inpaintRadius=5,
+                                 flags=cv2.INPAINT_NS)
+        return inpainted
+
+
+# ============================================================================
 # 高级 CV 扫描器主类 v1.1.0
 # ============================================================================
 
@@ -623,6 +696,7 @@ class AdvancedCVScanner:
         self.stain_remover = ColorStainRemover()
         self.speckle_filter = SpeckleFilter()
         self.deblurrer = MotionDeblurrer()
+        self.tear_inpainter = TearInpainter()
 
     def classify_damage(self, gray):
         issues = []
@@ -713,7 +787,7 @@ class AdvancedCVScanner:
             variants.append(('unwarped', unwarped))
         except: pass
 
-        # ---- V4: 定位符修补 (NCC模板匹配) ----
+        # ---- V4: 定位符修补 (标准 NCC) ----
         try:
             centers = self.finder_patcher.detect_finder_centers(gray, threshold=0.45)
             if len(centers) >= 2 and len(centers) < 3:
@@ -722,14 +796,35 @@ class AdvancedCVScanner:
                     variants.append(('finder_patched',
                                      cv2.cvtColor(patched_gray, cv2.COLOR_GRAY2BGR)))
             elif len(centers) >= 6:
-                # 多码裁剪
                 rois = self.cropper.crop_rois(gray, bgr)
                 for i, (rg, rb, _) in enumerate(rois):
                     if rb is not None:
                         variants.append((f'roi_{i}', rb))
         except: pass
 
-        # ---- V5: 原图 + 查找器修补 (不依赖检测) ----
+        # ---- V5: 低阈值查找器修补 (for torn/damaged finders) ----
+        try:
+            centers_low = self.finder_patcher.detect_finder_centers(gray, threshold=0.35)
+            if 2 <= len(centers_low) < 3:
+                patched_low = gray.copy()
+                if self.finder_patcher.reconstruct_missing_finder(patched_low, centers_low):
+                    variants.append(('finder_patched_low',
+                                     cv2.cvtColor(patched_low, cv2.COLOR_GRAY2BGR)))
+        except: pass
+
+        # ---- V5b: 极低阈值 (for severely torn) ----
+        try:
+            centers_vlow = self.finder_patcher.detect_finder_centers(gray, threshold=0.30)
+            if 2 <= len(centers_vlow) < 3:
+                patched_vlow = gray.copy()
+                if self.finder_patcher.reconstruct_missing_finder(patched_vlow, centers_vlow):
+                    final_v = self.restorer.restore(
+                        cv2.cvtColor(patched_vlow, cv2.COLOR_GRAY2BGR), is_1d_barcode=False)
+                    if len(final_v.shape) == 2: final_v = cv2.cvtColor(final_v, cv2.COLOR_GRAY2BGR)
+                    variants.append(('finder_vlow', final_v))
+        except: pass
+
+        # ---- V6: 原图 + 查找器修补 (不依赖检测) ----
         try:
             centers2 = self.finder_patcher.detect_finder_centers(gray, threshold=0.4)
             if 2 <= len(centers2) < 3:
@@ -765,6 +860,57 @@ class AdvancedCVScanner:
         try:
             for i, dv in enumerate(self.deblurrer.deblur_multi(bgr)):
                 variants.append((f'deblur_{i}', dv))
+        except: pass
+
+        # ---- V10: 撕裂修复 (inpainting) ----
+        try:
+            inpainted = self.tear_inpainter.inpaint_tears(bgr)
+            variants.append(('tear_fixed', inpainted))
+        except: pass
+
+        # ---- V11: 形态学桥接 (closing to bridge torn edges) ----
+        try:
+            gray2 = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            binary = cv2.adaptiveThreshold(gray2, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY, 11, 3)
+            # 大核闭运算桥接撕裂缝隙
+            for ks in [7, 11, 15]:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
+                bridged = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k)
+                if 10 < np.mean(bridged) < 245:
+                    variants.append((f'bridged_{ks}', cv2.cvtColor(bridged, cv2.COLOR_GRAY2BGR)))
+        except: pass
+
+        # ---- V12: 水平/垂直分割解码 (for strip tears) ----
+        try:
+            gray3 = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            # 检测全白行/列 (撕裂线)
+            row_mean = np.mean(gray3, axis=1)
+            col_mean = np.mean(gray3, axis=0)
+            tear_rows = np.where(row_mean > 250)[0]
+            tear_cols = np.where(col_mean > 250)[0]
+            # 如果有连续白行 >10px → 水平撕裂
+            if len(tear_rows) > 10:
+                # 找到最大间隙
+                gaps = np.diff(tear_rows)
+                big_gaps = np.where(gaps > 10)[0]
+                if len(big_gaps) > 0:
+                    split_y = tear_rows[big_gaps[len(big_gaps)//2]]
+                    top = bgr[:split_y, :]
+                    bot = bgr[split_y:, :]
+                    for i, frag in enumerate([top, bot]):
+                        if frag.shape[0] > 30 and frag.shape[1] > 30:
+                            variants.append((f'hsplit_{i}', frag))
+            if len(tear_cols) > 10:
+                gaps = np.diff(tear_cols)
+                big_gaps = np.where(gaps > 10)[0]
+                if len(big_gaps) > 0:
+                    split_x = tear_cols[big_gaps[len(big_gaps)//2]]
+                    left = bgr[:, :split_x]
+                    right = bgr[:, split_x:]
+                    for i, frag in enumerate([left, right]):
+                        if frag.shape[0] > 30 and frag.shape[1] > 30:
+                            variants.append((f'vsplit_{i}', frag))
         except: pass
 
         # ---- 解码所有变体 ----
