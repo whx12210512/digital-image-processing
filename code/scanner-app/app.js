@@ -423,32 +423,33 @@ async function decodeImageFile(file, scanFormat) {
     const wantBarcode = scanFormat === 'all' || scanFormat === 'barcode';
     const merged = [];
 
-    // ====== BarcodeDetector: try-direct, retry-validated ======
+    // ====== BarcodeDetector: 3-level fallback ======
     if ((wantQr || wantBarcode) && 'BarcodeDetector' in window) {
         let detected = [];
+        // Level 1: all requested formats
         try {
-            const formats = [];
-            if (wantQr) formats.push('qr_code');
-            if (wantBarcode) {
-                formats.push('ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf');
-            }
-            const bd = new BarcodeDetector({ formats: formats });
-            detected = await bd.detect(canvas);
+            const fmts = [];
+            if (wantQr) fmts.push('qr_code');
+            if (wantBarcode) fmts.push('ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf');
+            detected = await new BarcodeDetector({ formats: fmts }).detect(canvas);
         } catch (e1) {
+            // Level 2: validate with getSupportedFormats
             try {
-                const supported = await BarcodeDetector.getSupportedFormats();
-                const formats = [];
-                if (wantQr && supported.includes('qr_code')) formats.push('qr_code');
+                const sup = await BarcodeDetector.getSupportedFormats();
+                const fmts = [];
+                if (wantQr && sup.includes('qr_code')) fmts.push('qr_code');
                 if (wantBarcode) {
                     for (const f of ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']) {
-                        if (supported.includes(f)) formats.push(f);
+                        if (sup.includes(f)) fmts.push(f);
                     }
                 }
-                if (formats.length > 0) {
-                    const bd = new BarcodeDetector({ formats: formats });
-                    detected = await bd.detect(canvas);
-                }
-            } catch (e2) { /* both failed, fall through */ }
+                if (fmts.length > 0) detected = await new BarcodeDetector({ formats: fmts }).detect(canvas);
+            } catch (e2) {
+                // Level 3: qr_code only (most widely supported)
+                try {
+                    if (wantQr) detected = await new BarcodeDetector({ formats: ['qr_code'] }).detect(canvas);
+                } catch (e3) { /* all failed */ }
+            }
         }
         for (const b of detected) {
             const isQr = b.format === 'qr_code' || b.format === 'QR Code';
@@ -475,14 +476,14 @@ async function decodeImageFile(file, scanFormat) {
     }
 
     // ====== Region-based fallback for sparse/large images ======
-    if (wantQr && merged.length === 0) {
+    if (wantQr && merged.length < 2) {
         try {
             const regionResults = await scanRegions(canvas, w, h);
             insertUnique(merged, regionResults);
         } catch (e) { /* region scan failed, continue */ }
     }
 
-    // ====== html5-qrcode: robust zxing WASM supplement ======
+    // ====== html5-qrcode: zxing WASM with 6s timeout ======
     if (wantQr) {
         try {
             const tempId = 'temp-scan-' + Date.now();
@@ -492,7 +493,12 @@ async function decodeImageFile(file, scanFormat) {
             document.body.appendChild(div);
             const scanner = new Html5Qrcode(tempId);
             try {
-                const result = await scanner.scanFile(file, false);
+                // 6-second timeout prevents hanging on corrupted images
+                const result = await Promise.race([
+                    scanner.scanFile(file, false),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('timeout')), 6000))
+                ]);
                 if (result && typeof result === 'string' && result.trim()) {
                     insertUnique(merged, [{ text: result, type: 'QR Code', confidence: 'html5-qrcode' }]);
                 }
@@ -500,7 +506,7 @@ async function decodeImageFile(file, scanFormat) {
                 try { await scanner.clear(); } catch {}
                 div.remove();
             }
-        } catch (e) { /* html5-qrcode failed */ }
+        } catch (e) { /* html5-qrcode failed or timed out */ }
     }
 
     return merged;
