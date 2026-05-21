@@ -391,7 +391,7 @@ def apply_perspective_barcode(img, shrink_ratio=None, shrink_side=None):
         透视变换后图像
     """
     if shrink_ratio is None:
-        shrink_ratio = random.uniform(0.2, 0.7)
+        shrink_ratio = random.uniform(0.35, 0.65)
     if shrink_side is None:
         shrink_side = random.choice(['left', 'right'])
 
@@ -434,6 +434,7 @@ def apply_perspective_barcode(img, shrink_ratio=None, shrink_side=None):
     H_final = H_adj @ H
 
     result = cv2.warpPerspective(img, H_final, (max_x - min_x, max_y - min_y),
+                                  flags=cv2.INTER_LANCZOS4,
                                   borderMode=cv2.BORDER_CONSTANT,
                                   borderValue=(255, 255, 255))
     return result
@@ -484,6 +485,10 @@ def generate_geometric_image(index):
     生成几何畸变测试图。
 
     随机选择: 纯透视 / 纯柱面 / 透视+柱面复合。
+    所有参数基于 v2.0.1 现实物理建模:
+      - 透视压缩: 35-65% (模拟 30-60° 斜视)
+      - 柱面曲率: 0.12-0.30 (对应直径 1.5-8cm 瓶罐)
+      - 插值: INTER_LANCZOS4 (保留条码边缘)
     """
     img, bc_type, data = generate_valid_barcode()
     h, w = img.shape[:2]
@@ -494,22 +499,21 @@ def generate_geometric_image(index):
     )[0]
 
     if variant == 'perspective':
-        shrink_ratio = random.uniform(0.25, 0.7)
+        shrink_ratio = random.uniform(0.35, 0.65)
         side = random.choice(['left', 'right'])
         result = apply_perspective_barcode(img, shrink_ratio, side)
         fname = f"barcode_geo_persp_{index:04d}_{bc_type.upper()}.png"
 
     elif variant == 'cylinder':
-        curvature = random.uniform(0.3, 0.85)
+        curvature = random.uniform(0.12, 0.30)
         result = apply_cylinder_warp_horizontal(img, curvature)
         fname = f"barcode_geo_cyl_{index:04d}_{bc_type.upper()}.png"
 
     else:  # combo
-        # 先透视后柱面
-        shrink_ratio = random.uniform(0.4, 0.8)
+        shrink_ratio = random.uniform(0.40, 0.65)
         side = random.choice(['left', 'right'])
         result = apply_perspective_barcode(img, shrink_ratio, side)
-        curvature = random.uniform(0.2, 0.6)
+        curvature = random.uniform(0.12, 0.25)
         result = apply_cylinder_warp_horizontal(result, curvature)
         fname = f"barcode_geo_combo_{index:04d}_{bc_type.upper()}.png"
 

@@ -126,7 +126,7 @@ python code/test-generator/generate_all.py
 | 类别 | 数量 | 正确率 | 状态 |
 |------|------|--------|------|
 | barcode_cylinder | 110 | 94.5% | PASS ✅ |
-| barcode_geometric | 110 | 12.7% | FAIL ⚠ |
+| barcode_geometric | 110 | 91.8% | PASS ✅ |
 | barcode_highlight | 110 | 100.0% | PASS |
 | barcode_ink | 110 | 100.0% | PASS |
 | barcode_lowcontrast | 110 | 100.0% | PASS |
@@ -151,7 +151,7 @@ python code/test-generator/generate_all.py
 | liquid_coffee | 40 | 100.0% | PASS |
 | liquid_water_drops | 40 | 100.0% | PASS |
 | multi_qr | 110 | 70.0% | FAIL ⚠ |
-| **总计** | **3,208** | **90.6%** | **22/26 PASS** |
+| **总计** | **3,208** | **92.7%** | **23/26 PASS** |
 
 ### v2.0.1 改进成果 — 柱面弯曲专项修复
 
@@ -176,6 +176,7 @@ y = cy + (y' - cy) · √(1 + arcsin²((x' - cx) / R))
 |--------|--------|--------|------|----------|
 | geometric_curved | 0.0% | **96.4%** | +96.4% | 数学逆柱面变换, 曲率估计, 自适应展开 |
 | barcode_cylinder | 0.0% | **94.5%** | +94.5% | 纯水平逆柱面 (INTER_LANCZOS4), 高分辨率 (800px) |
+| barcode_geometric | 12.7% | **91.8%** | +79.1% | 柱面+透视复合逆变换, LANCZOS4, 物理曲率范围 |
 
 **几何生成器调整**:
 - geometric_curved: 移除波纹/复合变体 (现实生活中不存在), 纯柱面; 曲率 0.08–0.35 (对应瓶罐直径 ~1.5–8cm)
@@ -207,7 +208,6 @@ y = cy + (y' - cy) · √(1 + arcsin²((x' - cx) / R))
 
 | 类别 | 原因 |
 |------|------|
-| barcode_geometric (12.7%) | 透视压缩 (25-70%) + 柱面弯曲从根本上破坏条空宽度比, pyzbar 无法恢复 |
 | edge_tear (48.2%) | 大面积撕裂/碎片导致 >40% 数据缺失, 修复算法无法重建缺失模块 |
 | damage_noise (70.9%) | 随机破坏 (划痕+噪声+模糊+遮挡) 在 ~30% 图像中损毁 QR 定位符 |
 | multi_qr (70.0%) | 多码图像中小码 (<50px) 或高度变换码超出定位符检测能力 |

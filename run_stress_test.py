@@ -102,12 +102,35 @@ def engine_pyzbar(bgr):
                 if r: return [('pyzbar_persp_bin', r[0][0], r[0][1])]
         except: pass
 
-    # Try cylindrical unwarping for curved barcodes
+    # Try cylindrical unwarping (scanline method, for barcodes)
     try:
         unwarped = CylindricalUnwarper.unwarp(bgr)
         r = try_decode(unwarped)
         if r: return [('pyzbar_unwarped', r[0][0], r[0][1])]
     except: pass
+
+    # Try barcode-specific mathematical cylinder unwarping (v2.0.1)
+    if w > h * 1.2:
+        try:
+            for curv in [c/100.0 for c in range(10, 35, 2)]:
+                unw = CylindricalUnwarper.unwarp_cylinder_barcode(bgr, curv)
+                r = try_decode(unw)
+                if r: return [('pyzbar_bc_cyl', r[0][0], r[0][1])]
+        except: pass
+
+        # Try cylinder unwarp + perspective normalization (for combo distortion)
+        try:
+            for curv in [c/100.0 for c in range(10, 35, 3)]:
+                unw = CylindricalUnwarper.unwarp_cylinder_barcode(bgr, curv)
+                norm = PerspectiveBarcodeNormalizer.normalize_perspective(unw)
+                if norm is not None:
+                    r = try_decode(norm)
+                    if r: return [('pyzbar_cyl_persp', r[0][0], r[0][1])]
+                    ng2 = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
+                    nb2 = cv2.adaptiveThreshold(ng2, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 4)
+                    r = try_decode(cv2.cvtColor(nb2, cv2.COLOR_GRAY2BGR))
+                    if r: return [('pyzbar_cyl_persp_bin', r[0][0], r[0][1])]
+        except: pass
 
     # Inverted binary (white-on-black)
     inv = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 9)
