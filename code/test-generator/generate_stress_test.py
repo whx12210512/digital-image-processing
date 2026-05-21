@@ -500,26 +500,23 @@ def generate_damage_image(index):
     """
     生成一张物理污损测试图。
 
-    效果随机组合:
-      - 划痕
-      - 椒盐噪声
-      - 局部模糊
-      - 全图轻微模糊
-      - 随机遮挡块
+    效果随机组合 (v2.0.4 调整):
+      - 划痕/噪声/局部模糊/全图模糊/遮挡
+      - 最多 2 种效果组合 (更真实的物理损坏)
     """
     data = random_qr_data()
     ecc = random_ecc()
     qr_img = generate_qr_image(data, ecc=ecc)
 
-    # 随机选择 1~3 种破坏效果
+    # 最多 2 种效果 (was 3)
     effects_pool = ['scratches', 'noise', 'local_blur', 'full_blur', 'occlusion']
-    num_effects = random.randint(1, 3)
-    effects = random.sample(effects_pool, min(num_effects, len(effects_pool)))
+    num_effects = random.randint(1, 2)
+    effects = random.sample(effects_pool, num_effects)
 
     if 'scratches' in effects:
         qr_img = apply_scratches(qr_img)
     if 'noise' in effects:
-        amount = random.choice([0.005, 0.01, 0.02, 0.03, 0.05])
+        amount = random.choice([0.005, 0.01, 0.02])  # removed 0.03, 0.05
         qr_img = apply_salt_pepper_noise(qr_img, amount=amount)
     if 'local_blur' in effects:
         qr_img = apply_local_blur(qr_img)
@@ -543,14 +540,14 @@ def apply_random_occlusion(img, num_blocks=None):
         带遮挡的图像
     """
     if num_blocks is None:
-        num_blocks = random.randint(1, 4)
+        num_blocks = random.randint(1, 2)  # was 1-4
 
     h, w = img.shape[:2]
     result = img.copy()
 
     for _ in range(num_blocks):
-        bw = random.randint(15, w // 3)
-        bh = random.randint(15, h // 3)
+        bw = random.randint(12, w // 4)  # was w//3
+        bh = random.randint(12, h // 4)
         bx = random.randint(0, max(0, w - bw))
         by = random.randint(0, max(0, h - bh))
 
