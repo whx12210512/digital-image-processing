@@ -10,6 +10,8 @@ const state = {
     isScanning: false,
     scanFormat: 'all',       // 'all' | 'qr' | 'barcode'
     facingMode: 'environment',
+    flashlightOn: false,
+    hasFlashlight: false,
     soundEnabled: true,
     autoRedirect: true,
     cameraResults: [],
@@ -99,6 +101,7 @@ function setupTabs() {
 function setupButtons() {
     document.getElementById('btnStartScan').addEventListener('click', startScan);
     document.getElementById('btnStopScan').addEventListener('click', stopScan);
+    document.getElementById('btnFlashlight').addEventListener('click', toggleFlashlight);
     document.getElementById('btnUpload').addEventListener('click', () => {
         document.getElementById('fileInput').click();
     });
@@ -153,7 +156,6 @@ async function startScan() {
             formatsToSupport: formatsToSupport,
         };
 
-        // Configure based on scan format
         if (state.scanFormat === 'barcode') {
             config.qrbox = { width: 300, height: 150 };
         }
@@ -168,10 +170,42 @@ async function startScan() {
             onScanSuccess,
             onScanFailure
         );
+
+        // Check flashlight availability after camera starts
+        try {
+            const capabilities = state.scanner.getRunningTrackCapabilities();
+            if (capabilities && capabilities.torch) {
+                state.hasFlashlight = true;
+                document.getElementById('btnFlashlight').style.display = 'flex';
+            }
+        } catch {
+            // Flashlight not available on this device
+        }
     } catch (err) {
         console.error('Camera start error:', err);
         showToast('无法打开摄像头: ' + (err.message || '权限不足'));
         resetScanUI();
+    }
+}
+
+async function toggleFlashlight() {
+    if (!state.isScanning || !state.hasFlashlight) return;
+    try {
+        state.flashlightOn = !state.flashlightOn;
+        await state.scanner.applyVideoConstraints({
+            advanced: [{ torch: state.flashlightOn }]
+        });
+        const btn = document.getElementById('btnFlashlight');
+        if (state.flashlightOn) {
+            btn.classList.add('active');
+            btn.title = '关闭手电筒';
+        } else {
+            btn.classList.remove('active');
+            btn.title = '打开手电筒';
+        }
+    } catch {
+        showToast('手电筒不可用');
+        state.flashlightOn = false;
     }
 }
 
@@ -209,11 +243,46 @@ function onScanSuccess(decodedText, decodedResult) {
 
     if (state.cameraResults.length === 1) {
         displayResult(decodedText, type, 'resultCard', 'resultType', 'resultContent', 'resultConfidence');
-        showToast('扫描到 1 个, 继续扫描中...');
+        showToast('已扫描 1 个, 继续扫描中...');
     } else {
-        card.innerHTML = buildMultiResultHtml(state.cameraResults);
-        showToast(`扫描到 ${state.cameraResults.length} 个结果`);
+        card.innerHTML = buildMultiSelectHtml(state.cameraResults);
+        showToast(`已扫描 ${state.cameraResults.length} 个, 点击查看详情`);
     }
+}
+
+function selectMultiResult(index) {
+    const r = state.cameraResults[index];
+    if (!r) return;
+    const card = document.getElementById('resultCard');
+    displayResultHtml(card, r.text, r.type, 'resultType', 'resultContent', 'resultConfidence');
+    // Add a "back to list" button
+    const backBtn = document.createElement('button');
+    backBtn.className = 'btn-sm';
+    backBtn.style.cssText = 'margin-top:8px;';
+    backBtn.textContent = '← 返回列表';
+    backBtn.onclick = () => {
+        card.innerHTML = buildMultiSelectHtml(state.cameraResults);
+    };
+    card.querySelector('.result-actions')?.appendChild(backBtn);
+}
+
+function displayResultHtml(card, text, type, typeId, contentId, confidenceId) {
+    const url = isUrl(text);
+    card.innerHTML = `
+        <div class="result-header">
+            <span class="badge ${type === 'QR Code' ? '' : 'barcode'}">${type}</span>
+            <span class="confidence"></span>
+            <button onclick="this.closest('.result-card').style.display='none'" class="icon-btn-sm">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+        <div class="result-content" style="font-size:20px;font-family:monospace;word-break:break-all;">${escapeHtml(text)}</div>
+        <div class="result-actions">
+            <button id="btnCopy" class="btn-sm" onclick="navigator.clipboard.writeText('${escapeHtml(text).replace(/'/g, "\\'")}');showToast('已复制')">复制</button>
+            ${url ? `<button id="btnOpenUrl" class="btn-sm" onclick="window.open('${escapeHtml(text)}','_blank')">打开链接</button>` : ''}
+        </div>
+    `;
+    state.currentResult = text;
 }
 
 function onScanFailure(error) {
@@ -244,6 +313,10 @@ function resetScanUI() {
     document.getElementById('scanPlaceholder').style.display = 'flex';
     document.getElementById('btnStartScan').style.display = 'flex';
     document.getElementById('btnStopScan').style.display = 'none';
+    document.getElementById('btnFlashlight').style.display = 'none';
+    document.getElementById('btnFlashlight').classList.remove('active');
+    state.flashlightOn = false;
+    state.hasFlashlight = false;
 }
 
 // ============ Image File Scanner ============
@@ -291,24 +364,26 @@ async function scanImageFile(file, cardId, typeId, contentId, confidenceId, isGa
 }
 
 function buildMultiResultHtml(results) {
+    return buildMultiSelectHtml(results);
+}
+
+function buildMultiSelectHtml(results) {
     return `
         <div class="result-header">
             <span class="badge" style="background:#1a73e8;">${results.length} 个结果</span>
-            <button onclick="this.parentElement.parentElement.style.display='none'" class="icon-btn-sm">
+            <span style="font-size:12px;color:#888;">点击查看详情</span>
+            <button onclick="this.closest('.result-card').style.display='none'" class="icon-btn-sm">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
         </div>
         ${results.map((r, i) => `
-            <div class="multi-result-item">
+            <div class="multi-result-item" onclick="selectMultiResult(${i})" style="cursor:pointer;">
                 <div class="mri-header">
+                    <span class="mri-index">● ${i + 1}</span>
                     <span class="badge ${r.type === 'QR Code' ? '' : 'barcode'}">${r.type}</span>
-                    <span class="mri-index">#${i + 1}</span>
                 </div>
-                <div class="result-content" style="font-size:15px;font-family:monospace;">${escapeHtml(r.text)}</div>
-                <div class="result-actions">
-                    <button onclick="event.stopPropagation();navigator.clipboard.writeText('${escapeHtml(r.text).replace(/'/g, "\\'")}');showToast('已复制')" class="btn-sm">复制</button>
-                    ${isUrl(r.text) ? `<button onclick="event.stopPropagation();window.open('${escapeHtml(r.text)}','_blank')" class="btn-sm">打开链接</button>` : ''}
-                </div>
+                <div class="result-content" style="font-size:14px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.text)}</div>
+                <div style="text-align:right;color:#1a73e8;font-size:12px;">点击查看 →</div>
             </div>
         `).join('')}
     `;

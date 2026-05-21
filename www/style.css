@@ -237,6 +237,19 @@ html, body {
     border: 1.5px solid var(--primary);
 }
 .btn-outline:active { background: #e8f0fe; }
+.btn-icon-round {
+    width: 48px; height: 48px; border-radius: 50%;
+    background: #fff; color: #666;
+    border: 1.5px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.2s;
+}
+.btn-icon-round:active { background: #e8eaed; }
+.btn-icon-round.active {
+    background: #fef3c7; color: #f59e0b;
+    border-color: #f59e0b;
+    box-shadow: 0 0 12px rgba(245,158,11,0.3);
+}
 .btn-sm {
     padding: 8px 16px; font-size: 13px;
     background: var(--bg); color: var(--text);
@@ -281,12 +294,17 @@ html, body {
 
 /* Multi-Result Items */
 .multi-result-item {
-    padding: 12px 0;
+    padding: 12px 16px;
     border-bottom: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 4px;
+    transition: background 0.15s;
 }
+.multi-result-item:hover { background: #e8f0fe; }
+.multi-result-item:active { background: #d2e3fc; }
 .multi-result-item:last-of-type {
     border-bottom: none;
-    padding-bottom: 0;
+    margin-bottom: 0;
 }
 .mri-header {
     display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
