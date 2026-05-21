@@ -765,11 +765,15 @@ const Preprocess = {
         const med3ForClahe = this.medianBlur(imageData, 3);
         variants.push({ tag: 'med3+clahe', data: this.clahe(med3ForClahe, 2.0) });
 
-        // #8: Morphological close for barcode-like images
+        // #8: median5 standalone (28 ink_pollution images)
+        variants.push({ tag: 'median5', data: this.medianBlur(imageData, 5) });
+
+        // #9: Morphological close — critical for ink pollution (41 images), all types
+        variants.push({ tag: 'morphClose-5x1', data: this.morphClose(imageData, 5, 1) });
         if (w > h * 1.2) {
-            variants.push({ tag: 'morphClose-5x1', data: this.morphClose(imageData, 5, 1) });
             variants.push({ tag: 'morphClose-7x1', data: this.morphClose(imageData, 7, 1) });
         }
+        variants.push({ tag: 'morphClose-3x3', data: this.morphClose(imageData, 3, 3) });
 
         return variants;
     },
@@ -1609,11 +1613,10 @@ const GeoCorrect = {
     },
 
     unwarpQRMulti(imageData) {
-        const estC = this.estimateCurvature(imageData);
         const results = [];
-        // 13 curvature values (was 5) — tighter coverage for geometric_curved
-        for (const d of [-0.12, -0.10, -0.08, -0.06, -0.04, -0.02, 0.0, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12]) {
-            const c = Math.max(0.03, Math.min(0.45, estC + d));
+        // Full-range sweep (19 values) — curvature estimation unreliable for padded images
+        // Generator uses curvature 0.08-0.35, sweep wider to cover edge cases
+        for (let c = 0.04; c <= 0.40; c += 0.02) {
             results.push({ curvature: c, data: this.unwarpQR(imageData, c) });
         }
         return results;
