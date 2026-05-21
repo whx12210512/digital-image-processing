@@ -167,10 +167,9 @@ def apply_affine_transform(img, angle_deg, scale, tx, ty):
 
 def generate_multi_qr_background(w, h):
     """
-    生成复杂背景画布。
-    随机选择: 纯白 / 浅色渐变 / 模拟纸张纹理 / 彩色噪点。
+    生成背景画布 (v2.0.4: 移除 noise/paper 减少假定位符)。
     """
-    bg_type = random.choice(['white', 'gradient', 'paper', 'noise'])
+    bg_type = random.choice(['white', 'white', 'gradient'])  # mostly white
     canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
     if bg_type == 'white':
@@ -178,18 +177,10 @@ def generate_multi_qr_background(w, h):
     elif bg_type == 'gradient':
         for y in range(h):
             t = y / h
-            r = int(220 + 35 * t)
-            g = int(220 + 35 * (1 - t))
-            b = int(230 + 25 * random.random())
+            r = int(235 + 20 * t)
+            g = int(235 + 20 * (1 - t))
+            b = int(240 + 15 * random.random())
             canvas[y, :] = (b, g, r)
-    elif bg_type == 'paper':
-        canvas[:] = (245, 243, 235)
-        noise = np.random.randint(-8, 9, (h, w, 3), dtype=np.int16)
-        canvas = np.clip(canvas.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-    elif bg_type == 'noise':
-        canvas[:] = (255, 255, 255)
-        speckle = np.random.randint(-15, 16, (h, w, 3), dtype=np.int16)
-        canvas = np.clip(canvas.astype(np.int16) + speckle, 0, 255).astype(np.uint8)
 
     return canvas
 
@@ -205,19 +196,18 @@ def generate_multi_qr_image(index, num_codes=None):
         (filename, numpy BGR image)
     """
     if num_codes is None:
-        num_codes = random.randint(2, 5)
+        num_codes = random.randint(2, 4)  # was 2-5
 
     canvas = generate_multi_qr_background(CANVAS_WIDTH, CANVAS_HEIGHT)
-    used_positions = []  # 记录已占用的边界框，用于避免过度重叠
+    used_positions = []
 
     for i in range(num_codes):
         data = random_qr_data()
         ecc = random_ecc()
         qr_clean = generate_qr_image(data, size=QR_SIZE, ecc=ecc)
 
-        # 随机仿射参数
-        angle = random.uniform(-45, 45)
-        scale = random.uniform(0.4, 1.2)
+        angle = random.uniform(-30, 30)   # was -45..45
+        scale = random.uniform(0.55, 1.2) # was 0.4..1.2 (min ~110px vs 80px)
         # 平移量 (确保不超出画布太远)
         tx = random.randint(-80, 80)
         ty = random.randint(-80, 80)
