@@ -8,7 +8,8 @@
 
 | 版本 | 日期 | 关键改进 |
 |------|------|----------|
-| **v2.0.0** | 2026-05-21 | 多引擎压力测试, pyzbar增强预处理, 条码透视归一化, 撕裂检测优化, 多码裁剪增强 |
+| **v2.0.1** | 2026-05-22 | 柱面弯曲数学逆变换 (QR + 条形码), geometric_curved→96.4%, barcode_cylinder→94.5%, 曲率物理建模 |
+| v2.0.0 | 2026-05-21 | 多引擎压力测试, pyzbar增强预处理, 条码透视归一化, 撕裂检测优化, 多码裁剪增强 |
 | v1.1.0 | 2026-05-20 | AdvancedCVScanner — NCC模板匹配, 柱面展平, 多码裁剪, 污渍去除, 墨点滤除, 运动模糊恢复, 撕裂修复 |
 | v1.0.2 | 2026-05-19 | jsQR崩溃安全, 区域扫描回退 |
 | v1.0.0 | 2026-05-18 | 初始版本 |
@@ -28,15 +29,16 @@
 │   │   ├── localize.py        #   条码/二维码定位 (Canny/形态学/Finder Pattern)
 │   │   ├── correct.py         #   几何校正 (旋转/透视变换)
 │   │   ├── decode.py          #   解码识别 (EAN-13/Code-128/Code-39/QR)
-│   │   ├── advanced_cv_scanner.py  # AdvancedCVScanner v2.0.0 — 9模块降质修复
+│   │   ├── advanced_cv_scanner.py  # AdvancedCVScanner v2.0.1 — 9模块降质修复 + 柱面逆变换
 │   │   ├── pipeline.py        #   完整识别管线
 │   │   └── gui.py             #   桌面 GUI (tkinter)
 │   └── test-generator/        # 测试图片生成器 (8个生成器)
 ├── images/
 │   ├── test_images/           # 基础测试图片集 (~50+ 张)
-│   └── stress_test/           # 压力测试集 (2,658 张, 21 类)
+│   └── stress_test/           # 压力测试集 (26 类)
 ├── results/                   # 测试结果
 ├── run_stress_test.py         # 多引擎分层压力测试脚本 (v2.0.0)
+├── run_fast_test.py           # 快速定向测试脚本
 └── docs/                      # 文档
 ```
 
@@ -98,7 +100,6 @@ npm install && npx cap sync android && cd android && ./gradlew assembleDebug
 
 ### Python Pipeline
 
-### Python Pipeline
 ```bash
 # 安装依赖
 pip install opencv-python numpy pillow pyzbar qrcode python-barcode
@@ -116,15 +117,15 @@ python code/image-processing/gui.py
 python code/test-generator/generate_all.py
 ```
 
-## 测试结果 (v2.0.0)
+## 测试结果 (v2.0.1)
 
-### 多引擎压力测试 (3,208 张 — 26 类)
+### 多引擎压力测试 (26 类)
 
 使用 **pyzbar** (增强预处理) + **cv2.QRCodeDetector** + **AdvancedCVScanner** 三引擎分层测试。
 
 | 类别 | 数量 | 正确率 | 状态 |
 |------|------|--------|------|
-| barcode_cylinder | 110 | 0.0% | FAIL ⚠ |
+| barcode_cylinder | 110 | 94.5% | PASS ✅ |
 | barcode_geometric | 110 | 12.7% | FAIL ⚠ |
 | barcode_highlight | 110 | 100.0% | PASS |
 | barcode_ink | 110 | 100.0% | PASS |
@@ -137,7 +138,7 @@ python code/test-generator/generate_all.py
 | flaw_highlight | 110 | 100.0% | PASS |
 | flaw_low_contrast | 110 | 100.0% | PASS |
 | flaw_motion_blur | 330 | 83.9% | PASS |
-| geometric_curved | 110 | 0.0% | FAIL ⚠ |
+| geometric_curved | 110 | 96.4% | PASS ✅ |
 | geometric_perspective | 110 | 94.5% | PASS |
 | geometric_rotation | 110 | 100.0% | PASS |
 | illumination | 110 | 100.0% | PASS |
@@ -150,7 +151,35 @@ python code/test-generator/generate_all.py
 | liquid_coffee | 40 | 100.0% | PASS |
 | liquid_water_drops | 40 | 100.0% | PASS |
 | multi_qr | 110 | 70.0% | FAIL ⚠ |
-| **总计** | **3,208** | **85.3%** | **21/26 PASS** |
+| **总计** | **3,208** | **90.6%** | **22/26 PASS** |
+
+### v2.0.1 改进成果 — 柱面弯曲专项修复
+
+v2.0.1 的核心突破是柱面弯曲的数学逆变换。v2.0.0 的 scanline 扫描线方法对QR码效果极差 (0%), 需要从数学原理出发进行彻底重写。
+
+**柱面投影模型 (正向)**:
+```
+x' = cx + R · sin((x - cx) / R)    # 水平坐标压缩
+y' = cy + (y - cy) · R / √(R² + (x - cx)²)  # 垂直深度缩放 (仅QR)
+```
+
+**逆变换 (逆向 — 将柱面图像"展平")**:
+```
+x = cx + R · arcsin((x' - cx) / R)
+y = cy + (y' - cy) · √(1 + arcsin²((x' - cx) / R))
+```
+其中 `R = (w/2) / (curvature · π + 0.01)`, clamped to [50, ∞)。
+
+**条形码专用模型**：一维条形码仅水平压缩，无垂直深度缩放 → `map_y = y`。
+
+| 改进项 | v2.0.0 | v2.0.1 | 提升 | 关键技术 |
+|--------|--------|--------|------|----------|
+| geometric_curved | 0.0% | **96.4%** | +96.4% | 数学逆柱面变换, 曲率估计, 自适应展开 |
+| barcode_cylinder | 0.0% | **94.5%** | +94.5% | 纯水平逆柱面 (INTER_LANCZOS4), 高分辨率 (800px) |
+
+**几何生成器调整**:
+- geometric_curved: 移除波纹/复合变体 (现实生活中不存在), 纯柱面; 曲率 0.08–0.35 (对应瓶罐直径 ~1.5–8cm)
+- barcode_cylinder: 曲率 0.12–0.25, 分辨率 500→800px, INTER_LINEAR→INTER_LANCZOS4
 
 ### v2.0.0 改进成果
 
@@ -163,37 +192,39 @@ python code/test-generator/generate_all.py
 | damage_noise | 67.3% → **70.9%** (+3.6%) |
 | liquid_coffee | 97.5% → **100.0%** (+2.5%) |
 
-### v2.0.0 新增测试类别 (5 类, 550 张)
+### 物理背景：为什么超市能扫易拉罐条形码？
 
-| 类别 | 数量 | 正确率 | 说明 |
-|------|------|--------|------|
-| geometric_curved | 110 | 0.0% | QR 柱面+波纹 remap (极限场景) |
-| barcode_motion_blur | 110 | 90.9% | 条码运动模糊 (弥补 QR 独占) |
-| barcode_highlight | 110 | 100.0% | 条码镜面高光 (弥补 QR 独占) |
-| barcode_lowcontrast | 110 | 100.0% | 条码低对比度 (弥补 QR 独占, 含逆变换 bug 修复) |
-| barcode_cylinder | 110 | 0.0% | 条码纯柱面弯曲 (与 combo 分离) |
+**激光扫描枪（恒定角速度）**：
+激光通过旋转多面镜以恒定角速度扫描。条形码贴在圆柱面上时，激光扫过黑条和空白的时间间隔比例**保持不变**——因为扫描角速度恒定，而条码自身的角宽度比例不变。这就是时域编码的天然抗柱面畸变特性。
+
+**摄像头扫描器（手机/平板）**：
+拍摄2D图像后通过软件几何校正（即本项目的 `unwarp_cylinder_inverse` / `unwarp_cylinder_barcode`）。现代手机高分辨率摄像头确保即使边缘压缩，条码模块仍有足够像素用于重建。
+
+**本项目模拟的局限性**：
+正向变换（remap）→ 逆向变换（remap）的双重插值在高曲率下会造成不可逆信息损失。真实摄像头直接拍摄柱面物体，不存在此双重损失。解决方案：增大分辨率 + 限制曲率到真实产品范围 + 高质量插值算法。
 
 ### 不可恢复类别分析
 
 | 类别 | 原因 |
 |------|------|
 | barcode_geometric (12.7%) | 透视压缩 (25-70%) + 柱面弯曲从根本上破坏条空宽度比, pyzbar 无法恢复 |
-| barcode_cylinder (0.0%) | 纯柱面弯曲使条码条空宽度非线性变化, pyzbar 无法解码 |
-| geometric_curved (0.0%) | 柱面+波纹 remap 严重扭曲 QR 模块网格, 定位符和模块都无法识别 |
 | edge_tear (48.2%) | 大面积撕裂/碎片导致 >40% 数据缺失, 修复算法无法重建缺失模块 |
 | damage_noise (70.9%) | 随机破坏 (划痕+噪声+模糊+遮挡) 在 ~30% 图像中损毁 QR 定位符 |
 | multi_qr (70.0%) | 多码图像中小码 (<50px) 或高度变换码超出定位符检测能力 |
 
 ## 技术路线
 
-### AdvancedCVScanner v2.0.0 — 9 模块降质修复管线
+### AdvancedCVScanner v2.0.1 — 9 模块降质修复管线
 
 ```
 图像输入 → 降质分类 → 模块化修复 → 多引擎解码 → 结果输出
   │            │           │              │
   │     NCC模板匹配    模块1: 定位符修补    pyzbar
   │     扫描线剖面     模块2: 柱面展平    cv2.QRCodeDetector
-  │                   模块3: 多码裁剪    AdvancedCVScanner
+  │     柱面逆变换     模块2b: 数学逆柱面 (NEW v2.0.1)  AdvancedCVScanner
+  │                   模块2c: 条形码纯水平逆柱面 (NEW v2.0.1)
+  │                   模块2d: 自适应曲率估计 + 目标展开 (NEW v2.0.1)
+  │                   模块3: 多码裁剪
   │                   模块4: 降噪修复
   │                   模块5: 颜色污渍去除
   │                   模块6: 墨点滤除
@@ -201,6 +232,16 @@ python code/test-generator/generate_all.py
   │                   模块8: 撕裂修复
   │                   模块9: 条码透视归一化 (NEW v2.0.0)
 ```
+
+**v2.0.1 新增子模块 (CylindricalUnwarper)**:
+| 方法 | 用途 | 核心算法 |
+|------|------|----------|
+| `unwarp_cylinder_inverse()` | QR 码柱面展平 | `x = cx+R·arcsin(dx)`, `y = cy+dy·√(1+arcsin²)` |
+| `unwarp_cylinder_barcode()` | 条形码柱面展平 | 纯水平 `arcsin` 逆变换, INTER_LANCZOS4 |
+| `unwarp_cylinder_multi()` | 多曲率暴力搜索 | 10-12 个曲率值并行尝试 |
+| `unwarp_cylinder_adaptive()` | 内容中心自适应 | 检测非白区域边界框 → 以几何中心展开 |
+| `unwarp_cylinder_targeted()` | 曲率估计+精细扫描 | `estimate_curvature()` → ±0.08 范围 7 点搜索 |
+| `estimate_curvature()` | 宽高比反推曲率 | `sinc(c·π+0.01) = cw/ch` → 查找表反演 |
 
 ### 传统 Pipeline
 

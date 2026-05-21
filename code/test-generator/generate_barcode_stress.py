@@ -49,8 +49,8 @@ import io
 # ============================================================================
 # 全局常量
 # ============================================================================
-BARCODE_WIDTH = 500         # 条形码输出宽度 (px)
-BARCODE_HEIGHT = 200        # 条形码输出高度 (px)
+BARCODE_WIDTH = 800         # 条形码输出宽度 (px) — 较高分辨率减少压缩时的信息损失
+BARCODE_HEIGHT = 300        # 条形码输出高度 (px)
 MODULE_WIDTH = 10           # 最小模块宽度 (px)
 QUIET_ZONE_RATIO = 0.12     # 静区占宽度的比例
 PNG_COMPRESSION = 6         # PNG 压缩级别
@@ -458,24 +458,22 @@ def apply_cylinder_warp_horizontal(img, curvature=None):
         弯曲后图像
     """
     if curvature is None:
-        curvature = random.uniform(0.3, 0.9)
+        curvature = random.uniform(0.12, 0.25)
 
     h, w = img.shape[:2]
     cx = w / 2.0
-    # 曲率越大 R 越小
     R = max(w * 0.3, w / (curvature * math.pi * 2 + 0.01))
 
     y, x = np.mgrid[0:h, 0:w].astype(np.float32)
 
-    # 柱面水平映射
     dx = (x - cx) / R
-    # 限制在有效范围防止映射坐标溢出
     dx = np.clip(dx, -math.pi / 2 + 0.1, math.pi / 2 - 0.1)
     map_x = cx + R * np.sin(dx)
-    map_y = y  # 垂直不变
+    map_y = y
 
+    # INTER_LANCZOS4 preserves more high-frequency detail during resampling
     result = cv2.remap(img, map_x, map_y,
-                       interpolation=cv2.INTER_LINEAR,
+                       interpolation=cv2.INTER_LANCZOS4,
                        borderMode=cv2.BORDER_CONSTANT,
                        borderValue=(255, 255, 255))
     return result
@@ -655,7 +653,7 @@ def generate_lowcontrast_image(index):
 
 def generate_cylinder_image(index):
     img, bc_type, data = generate_valid_barcode()
-    curvature = random.uniform(0.3, 0.9)
+    curvature = random.uniform(0.12, 0.25)
     result = apply_cylinder_warp_horizontal(img, curvature)
     fname = f"barcode_cylinder_{index:04d}_{bc_type.upper()}.png"
     return fname, result

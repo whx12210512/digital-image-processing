@@ -204,16 +204,237 @@ class VirtualFinderPatcher:
 
 class CylindricalUnwarper:
     """
-    使用扫描线亮度剖面分析替代边缘检测进行弯曲边界提取。
+    曲面逆投影展平 — 支持扫描线分析和数学模型逆变换。
 
-    改进原理:
-        Canny 边缘在模糊/噪声/墨迹图像上极易断裂。
-        改用: 对每列像素提取垂直亮度剖面，
-              用亮度梯度变化点定位条码/QR区域的上下边界。
-        这比边缘检测更鲁棒，因为:
-          - 条码区域内部有大量黑白交替 → 亮度方差大
-          - 背景区一般为纯白/均匀 → 亮度方差小
+    两种方法:
+      1. unwarp(): 扫描线剖面分析 (适用于条形码等宽条码)
+      2. unwarp_cylinder_inverse(): 数学模型逆变换 (适用于QR码柱面弯曲)
+
+    柱面投影数学模型:
+      正向 (平面→柱面):
+        x' = cx + R * sin((x - cx) / R)
+        y' = cy + (y - cy) * R / sqrt(R² + (x - cx)²)
+      逆向 (柱面→平面):
+        x  = cx + R * arcsin((x' - cx) / R)
+        y  = cy + (y' - cy) * sqrt(1 + arcsin²((x' - cx) / R))
+      其中 R = (w/2) / (curvature * π + 0.01), clamped to [50, ∞)
     """
+
+    @staticmethod
+    def unwarp_cylinder_inverse(image, curvature):
+        """
+        使用数学逆模型将柱面弯曲的图像展平。
+
+        这是 build_cylinder_maps() 正向变换的严格逆变换。
+
+        参数:
+            image:     BGR 或灰度图像
+            curvature: 估计的曲率 [0, 1], 0=平面, 1=强弯曲
+        返回:
+            展平后的 BGR 图像
+        """
+        is_gray = len(image.shape) == 2
+        if is_gray:
+            h, w = image.shape
+            work = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        else:
+            h, w = image.shape[:2]
+            work = image.copy()
+
+        cx = w / 2.0
+        cy = h / 2.0
+        R = max(50.0, (w / 2.0) / (curvature * math.pi + 0.01))
+
+        y_dst, x_dst = np.mgrid[0:h, 0:w].astype(np.float32)
+
+        # 逆向 x 坐标
+        dx_norm = (x_dst - cx) / R
+        # arcsin 的输入必须在 [-1, 1] 范围内
+        dx_norm = np.clip(dx_norm, -0.9999, 0.9999)
+        arcsin_term = np.arcsin(dx_norm)
+        x_src = cx + R * arcsin_term
+
+        # 逆向 y 坐标
+        depth_factor = np.sqrt(1.0 + arcsin_term * arcsin_term)
+        y_src = cy + (y_dst - cy) * depth_factor
+
+        x_src = np.clip(x_src, 0, w - 1)
+        y_src = np.clip(y_src, 0, h - 1)
+
+        result = cv2.remap(work, x_src.astype(np.float32), y_src.astype(np.float32),
+                           cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_CONSTANT,
+                           borderValue=(255, 255, 255))
+        if is_gray:
+            return cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        return result
+
+    @staticmethod
+    def unwarp_cylinder_multi(image, curvatures=None):
+        """
+        尝试多个曲率值的逆柱面展平，返回所有展平结果。
+
+        参数:
+            image:      BGR 或灰度图像
+            curvatures: 曲率值列表 (None=默认 12 个密集采样)
+        返回:
+            [(curvature, unwarped_image), ...]
+        """
+        if curvatures is None:
+            curvatures = [0.06, 0.10, 0.14, 0.18, 0.22, 0.28, 0.34, 0.40, 0.48, 0.56]
+        results = []
+        for c in curvatures:
+            unw = CylindricalUnwarper.unwarp_cylinder_inverse(image, c)
+            results.append((c, unw))
+        return results
+
+    @staticmethod
+    def estimate_curvature(image):
+        """
+        通过图像内容宽高比估计柱面曲率。
+
+        原理: QR码是正方形，柱面投影后宽度被压缩。压缩比
+        r = content_width / content_height 与曲率 c 的关系为:
+        r ≈ sin(c*π + 0.01) / (c*π + 0.01)
+        通过查找表反演得到估计曲率值。
+        """
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image if len(image.shape) == 2 else image
+        if gray is None: return 0.20
+        _, thresh = cv2.threshold(gray, 248, 255, cv2.THRESH_BINARY_INV)
+        coords = cv2.findNonZero(thresh)
+        if coords is None: return 0.20
+        _, _, cw, ch = cv2.boundingRect(coords)
+        if cw < 30 or ch < 30: return 0.20
+        ratio = min(cw / max(ch, 1), 1.0)
+        best_c, best_diff = 0.20, 999.0
+        for c in [c / 100.0 for c in range(2, 50)]:
+            arg = c * math.pi + 0.01
+            expected = math.sin(arg) / arg if arg > 0.001 else 1.0
+            diff = abs(expected - ratio)
+            if diff < best_diff:
+                best_diff = diff
+                best_c = c
+        return max(0.04, min(0.48, best_c))
+
+    @staticmethod
+    def unwarp_cylinder_adaptive(image, curvatures=None):
+        """
+        自适应逆柱面展平：先检测内容区域，用其几何中心作为展开原点。
+
+        相比 unwarp_cylinder_multi，这个方法先找到图像中非背景区域的
+        边界框，以边界框中心为展开中心，消除了 padding 带来的中心偏移问题。
+
+        返回:
+            [(curvature, unwarped_image), ...]
+        """
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image if len(image.shape) == 2 else image.copy()
+        h, w = gray.shape[:2]
+
+        # 检测内容区域 (非白色背景)
+        _, thresh = cv2.threshold(gray, 248, 255, cv2.THRESH_BINARY_INV)
+        coords = cv2.findNonZero(thresh)
+        if coords is None:
+            return CylindricalUnwarper.unwarp_cylinder_multi(image, curvatures)
+
+        rx, ry, rw, rh = cv2.boundingRect(coords)
+        # 扩展到包含完整内容
+        rx, ry = max(0, rx - 3), max(0, ry - 3)
+        rw, rh = min(w - rx, rw + 6), min(h - ry, rh + 6)
+
+        if rw < 30 or rh < 30:
+            return CylindricalUnwarper.unwarp_cylinder_multi(image, curvatures)
+
+        # 裁剪到内容区并展开
+        cropped = image[ry:ry + rh, rx:rx + rw]
+
+        if curvatures is None:
+            curvatures = [0.06, 0.10, 0.14, 0.18, 0.22, 0.28, 0.34, 0.40, 0.48, 0.56]
+
+        results = []
+        for c in curvatures:
+            unw = CylindricalUnwarper.unwarp_cylinder_inverse(cropped, c)
+            results.append((c, unw))
+        return results
+
+    @staticmethod
+    def unwarp_cylinder_barcode(image, curvature):
+        """
+        专为一维条形码设计的纯水平逆柱面展平。
+
+        与 QR 码不同，条形码的柱面弯曲仅影响水平方向 (垂直方向无深度缩放)。
+        正向变换: x' = cx + R * sin((x - cx) / R), y' = y
+        逆向变换: x  = cx + R * arcsin((x' - cx) / R), y = y'
+
+        参数:
+            image:     BGR 或灰度图像
+            curvature: 曲率 [0, 1]
+        返回:
+            展平后的图像
+        """
+        is_gray = len(image.shape) == 2
+        if is_gray:
+            h, w = image.shape
+            work = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        else:
+            h, w = image.shape[:2]
+            work = image.copy()
+
+        cx = w / 2.0
+        # 使用与生成器一致的 R 计算公式
+        R = max(w * 0.3, w / (curvature * math.pi * 2 + 0.01))
+
+        y_dst, x_dst = np.mgrid[0:h, 0:w].astype(np.float32)
+
+        # 仅水平方向逆变换
+        dx_norm = np.clip((x_dst - cx) / R, -0.9999, 0.9999)
+        x_src = cx + R * np.arcsin(dx_norm)
+        x_src = np.clip(x_src, 0, w - 1)
+
+        # 垂直方向不变
+        y_src = y_dst
+
+        result = cv2.remap(work, x_src.astype(np.float32), y_src.astype(np.float32),
+                           cv2.INTER_LANCZOS4,
+                           borderMode=cv2.BORDER_CONSTANT,
+                           borderValue=(255, 255, 255))
+        if is_gray:
+            return cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        return result
+
+    @staticmethod
+    def unwarp_cylinder_barcode_multi(image, curvatures=None):
+        """
+        尝试多个曲率值的条形码逆柱面展平。
+
+        返回所有展平结果列表 [(curvature, image), ...]。
+        """
+        if curvatures is None:
+            curvatures = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
+        results = []
+        for c in curvatures:
+            unw = CylindricalUnwarper.unwarp_cylinder_barcode(image, c)
+            results.append((c, unw))
+        return results
+
+    @staticmethod
+    def unwarp_cylinder_targeted(image):
+        """
+        基于内容宽高比估计曲率后做精确逆柱面展平。
+
+        先调用 estimate_curvature() 从图像压缩比推断曲率，
+        再在该估计值附近做精细化扫描，大幅提高命中率。
+        """
+        est_c = CylindricalUnwarper.estimate_curvature(image)
+        fine_curvatures = sorted(set(
+            max(0.03, est_c + d) for d in [-0.08, -0.05, -0.02, 0.0, 0.02, 0.05, 0.08]
+        ))
+        return CylindricalUnwarper.unwarp_cylinder_multi(image, fine_curvatures)
 
     @staticmethod
     def unwarp(image, poly_degree=2):
@@ -987,10 +1208,51 @@ class AdvancedCVScanner:
                     variants.append(('persp_norm_bin', cv2.cvtColor(nb, cv2.COLOR_GRAY2BGR)))
         except: pass
 
-        # ---- V3: 曲面展平 ----
+        # ---- V3: 曲面展平 (扫描线法) ----
         try:
             unwarped = self.unwarper.unwarp(bgr)
             variants.append(('unwarped', unwarped))
+        except: pass
+
+        # ---- V3b: 数学模型逆柱面展平 (多曲率) ----
+        try:
+            for curv, unw in self.unwarper.unwarp_cylinder_multi(bgr):
+                variants.append((f'cylinder_inv_c{curv:.2f}', unw))
+                if len(unw.shape) == 3:
+                    ng = cv2.cvtColor(unw, cv2.COLOR_BGR2GRAY)
+                else:
+                    ng = unw
+                nb = cv2.adaptiveThreshold(ng, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                           cv2.THRESH_BINARY, 15, 3)
+                variants.append((f'cylinder_inv_bin_c{curv:.2f}', cv2.cvtColor(nb, cv2.COLOR_GRAY2BGR)))
+        except: pass
+
+        # ---- V3c: 自适应逆柱面展平 (检测内容中心后再展开) ----
+        try:
+            for curv, unw in self.unwarper.unwarp_cylinder_adaptive(bgr,
+                    [0.08, 0.14, 0.20, 0.28, 0.36, 0.44]):
+                variants.append((f'cyl_adapt_c{curv:.2f}', unw))
+                if len(unw.shape) == 3:
+                    ng = cv2.cvtColor(unw, cv2.COLOR_BGR2GRAY)
+                else:
+                    ng = unw
+                nb = cv2.adaptiveThreshold(ng, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                           cv2.THRESH_BINARY, 15, 3)
+                variants.append((f'cyl_adapt_bin_c{curv:.2f}', cv2.cvtColor(nb, cv2.COLOR_GRAY2BGR)))
+        except: pass
+
+        # ---- V3d: 条形码专用柱面展平 (仅水平方向逆向) ----
+        try:
+            if w > h * 1.2:  # 宽图像更可能是条形码
+                for curv, unw in self.unwarper.unwarp_cylinder_barcode_multi(bgr):
+                    variants.append((f'barcode_cyl_c{curv:.2f}', unw))
+                    if len(unw.shape) == 3:
+                        ng2 = cv2.cvtColor(unw, cv2.COLOR_BGR2GRAY)
+                    else:
+                        ng2 = unw
+                    nb2 = cv2.adaptiveThreshold(ng2, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                               cv2.THRESH_BINARY, 15, 3)
+                    variants.append((f'barcode_cyl_bin_c{curv:.2f}', cv2.cvtColor(nb2, cv2.COLOR_GRAY2BGR)))
         except: pass
 
         # ---- V4: 定位符修补 (标准 NCC) ----

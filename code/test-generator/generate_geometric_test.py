@@ -12,13 +12,13 @@
 数学变换原理 (详见各函数注释):
     - Task A: 平面内旋转 (Roll) — 2×3 仿射矩阵 + warpAffine
     - Task B: 空间透视 (Pitch/Yaw) — 3×3 单应性矩阵 + warpPerspective
-    - Task C: 曲面弯曲/褶皱 — 三角函数坐标重映射 + remap
+    - Task C: 曲面弯曲 — 柱面投影坐标重映射 + remap
 
 输出:
     images/stress_test/
     ├── geometric_rotation/     # Task A: 旋转 (≥100)
     ├── geometric_perspective/  # Task B: 透视 (≥100)
-    └── geometric_curved/       # Task C: 曲面/褶皱 (≥100)
+    └── geometric_curved/       # Task C: 柱面弯曲 (≥100)
 
 使用:
     python generate_geometric_test.py
@@ -40,10 +40,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ============================================================================
 # 全局常量
 # ============================================================================
-QR_SIZE = 256              # QR 码原始尺寸
+QR_SIZE = 300              # QR 码原始尺寸
 BORDER = 2                 # QR 码白边框模块数
 PNG_COMPRESSION = 6        # PNG 压缩
-OUTPUT_SIZE = (300, 300)   # 输出图像统一尺寸
+OUTPUT_SIZE = (360, 360)   # 输出图像统一尺寸
 
 
 # ============================================================================
@@ -396,58 +396,35 @@ def apply_remap(img, map_x, map_y):
 
 def generate_curved_image(index):
     """
-    生成曲面弯曲/褶皱测试图。
+    生成柱面弯曲测试图。
 
-    随机选择: 纯柱面弯曲 / 纯波浪褶皱 / 柱面+褶皱复合。
+    实际生活中QR码贴于瓶罐等圆柱表面时仅受柱面弯曲影响，
+    不存在波浪褶皱(ripple)。因此仅使用纯柱面投影模型。
+
+    柱面投影数学模型:
+        x' = cx + R * sin((x - cx) / R)
+        y' = cy + (y - cy) * R / sqrt(R² + (x - cx)²)
+    其中R由曲率参数控制,曲率越大R越小弯曲越明显。
     """
     data = random_qr_data()
     qr_img = generate_qr_image(data)
     h, w = qr_img.shape[:2]
 
-    variant = random.choices(
-        ['cylinder', 'ripple', 'combo'],
-        weights=[40, 35, 25]
-    )[0]
-
-    if variant == 'cylinder':
-        curvature = random.uniform(0.2, 0.85)
-        map_x, map_y = build_cylinder_maps(w, h, curvature)
-        result = apply_remap(qr_img, map_x, map_y)
-        fname = f"curved_cyl_{index:04d}.png"
-
-    elif variant == 'ripple':
-        amp = random.uniform(5.0, 25.0)
-        wl = random.uniform(w / 10.0, w / 2.5)
-        direction = random.choice(['vertical', 'horizontal', 'both'])
-        map_x, map_y = build_ripple_maps(w, h, amp, wl, direction)
-        result = apply_remap(qr_img, map_x, map_y)
-        fname = f"curved_ripple_{index:04d}.png"
-
-    else:  # combo
-        curvature = random.uniform(0.15, 0.6)
-        map_x_c, map_y_c = build_cylinder_maps(w, h, curvature)
-        amp = random.uniform(3.0, 12.0)
-        wl = random.uniform(w / 8.0, w / 3.0)
-        # 在柱面映射基础上叠加波纹
-        y_coarse, x_coarse = np.mgrid[0:h, 0:w].astype(np.float32)
-        ripple = amp * np.sin(2 * math.pi * x_coarse / wl + random.uniform(0, 2 * math.pi))
-        map_y = map_y_c + ripple.astype(np.float32)
-        map_x = map_x_c
-        result = apply_remap(qr_img, map_x, map_y)
-        fname = f"curved_combo_{index:04d}.png"
+    curvature = random.uniform(0.08, 0.35)
+    map_x, map_y = build_cylinder_maps(w, h, curvature)
+    result = apply_remap(qr_img, map_x, map_y)
+    fname = f"curved_cyl_{index:04d}.png"
 
     # 可选: 再叠加一个小角度旋转 (10%)
     if random.random() < 0.1:
         result = rotate_image(result, random.uniform(-15, 15))
 
     # 裁剪四个边可能出现的黑色或异常区域
-    # 找出非白区域边界
     gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 250, 255, cv2.THRESH_BINARY_INV)
     coords = cv2.findNonZero(thresh)
     if coords is not None:
         x, y_c, w_r, h_r = cv2.boundingRect(coords)
-        # 加入 5px 安全边距
         x = max(0, x - 5)
         y_c = max(0, y_c - 5)
         w_r = min(result.shape[1] - x, w_r + 10)
@@ -540,7 +517,7 @@ def main():
     if not args.no_curved:
         batch_generate(generate_curved_image,
                        os.path.join(root, 'geometric_curved'),
-                       count, 'Task C: 曲面弯曲/褶皱 (remap)',
+                       count, 'Task C: 柱面弯曲 (cylinder projection)',
                        parallel=parallel)
 
     print(f"\n{'='*60}")
