@@ -756,12 +756,16 @@ const Preprocess = {
             variants.push({ tag: 'morphOpen-5', data: this.morphOpen(imageData, 5) });
         }
 
-        // #6: Key adaptive thresholds
-        for (const [bs, c] of [[31, 9], [41, 13]]) {
+        // #6: Wide adaptive threshold sweep (8 key combos — Python uses 16)
+        for (const [bs, c] of [[21, 5], [31, 9], [41, 13], [51, 9], [21, 13], [31, 5], [41, 9], [51, 13]]) {
             variants.push({ tag: `adap-${bs}-${c}`, data: this.adaptiveThreshold(imageData, bs, c) });
         }
 
-        // #7: Morphological close for barcode-like images
+        // #7: Median3+CLAHE combo (for heavy noise)
+        const med3ForClahe = this.medianBlur(imageData, 3);
+        variants.push({ tag: 'med3+clahe', data: this.clahe(med3ForClahe, 2.0) });
+
+        // #8: Morphological close for barcode-like images
         if (w > h * 1.2) {
             variants.push({ tag: 'morphClose-5x1', data: this.morphClose(imageData, 5, 1) });
             variants.push({ tag: 'morphClose-7x1', data: this.morphClose(imageData, 7, 1) });
@@ -932,11 +936,16 @@ async function decodeImageFile(file, scanFormat) {
         }
     }
     if (wantQr && h > 40 && w > 40) {
-        // QR code: try QR-specific cylinder unwarping
         const qrVariants = GeoCorrect.unwarpQRMulti(imageData);
         for (const v of qrVariants) {
             correctedVariants.push({ tag: `qr-cyl-c${v.curvature.toFixed(2)}`, data: v.data });
         }
+    }
+
+    // ====== Fragment extraction (for edge_tear / torn images) ======
+    const fragments = GeoCorrect.extractFragments(imageData);
+    for (const frag of fragments) {
+        correctedVariants.push(frag);
     }
 
     // Helper to run BarcodeDetector on a variant
@@ -1602,12 +1611,87 @@ const GeoCorrect = {
     unwarpQRMulti(imageData) {
         const estC = this.estimateCurvature(imageData);
         const results = [];
-        for (const d of [-0.06, -0.03, 0.0, 0.03, 0.06]) {
-            const c = Math.max(0.03, estC + d);
+        // 13 curvature values (was 5) — tighter coverage for geometric_curved
+        for (const d of [-0.12, -0.10, -0.08, -0.06, -0.04, -0.02, 0.0, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12]) {
+            const c = Math.max(0.03, Math.min(0.45, estC + d));
             results.push({ curvature: c, data: this.unwarpQR(imageData, c) });
         }
         return results;
     },
+
+    /**
+     * Extract content fragments from torn/split images.
+     * Detects connected non-white regions and returns each as a separate ImageData.
+     * Ported from Python AdvancedCVScanner V12 multi-fragment splitting.
+     */
+    extractFragments(imageData) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        // Binary: non-white (gray < 250) = content, white = background
+        const bin = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            const gray = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+            bin[i] = gray < 250 ? 1 : 0;
+        }
+
+        // BFS connected components
+        const labels = new Int32Array(w * h).fill(-1);
+        let nextLabel = 0;
+        const fragments = [];  // {x, y, w, h, label}
+
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const idx = y * w + x;
+                if (bin[idx] !== 1 || labels[idx] >= 0) continue;
+
+                // BFS this component
+                const queue = [[x, y]];
+                labels[idx] = nextLabel;
+                let minX = x, maxX = x, minY = y, maxY = y;
+                let qi = 0;
+                while (qi < queue.length) {
+                    const [cx, cy] = queue[qi++];
+                    for (const [dx, dy] of [[0, 1], [1, 0], [0, -1], [-1, 0], [1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+                        const nx = cx + dx, ny = cy + dy;
+                        if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                            const ni = ny * w + nx;
+                            if (bin[ni] === 1 && labels[ni] < 0) {
+                                labels[ni] = nextLabel;
+                                queue.push([nx, ny]);
+                                if (nx < minX) minX = nx; if (nx > maxX) maxX = nx;
+                                if (ny < minY) minY = ny; if (ny > maxY) maxY = ny;
+                            }
+                        }
+                    }
+                }
+
+                const area = (maxX - minX + 1) * (maxY - minY + 1);
+                if (area > 1000 && queue.length > 50) {
+                    fragments.push({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, label: nextLabel });
+                }
+                nextLabel++;
+            }
+        }
+
+        if (fragments.length <= 1) return [];
+
+        // Extract each fragment as ImageData
+        const results = [];
+        for (const frag of fragments) {
+            if (frag.w < 25 || frag.h < 25) continue;
+            const out = new ImageData(frag.w, frag.h);
+            const dst = out.data;
+            for (let fy = 0; fy < frag.h; fy++) {
+                for (let fx = 0; fx < frag.w; fx++) {
+                    const si = ((frag.y + fy) * w + (frag.x + fx)) * 4;
+                    const di = (fy * frag.w + fx) * 4;
+                    dst[di] = src[si]; dst[di + 1] = src[si + 1];
+                    dst[di + 2] = src[si + 2]; dst[di + 3] = 255;
+                }
+            }
+            results.push({ tag: `frag-${frag.label}`, data: out });
+        }
+        return results;
+    }
 };
 
 // ---- Numerical helpers ----
