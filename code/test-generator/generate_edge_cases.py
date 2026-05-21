@@ -177,19 +177,20 @@ def apply_tear(img, num_tears=None):
         - 不规则缺口: 移除随机位置的不规则多边形
     """
     if num_tears is None:
-        num_tears = random.randint(1, 3)
+        num_tears = random.choices([1, 2], weights=[70, 30])[0]
 
     h, w = img.shape[:2]
     result = img.copy()
 
     for _ in range(num_tears):
-        tear_type = random.choice(['corner', 'strip', 'hole'])
+        # Weight corner tear (most realistic) higher than strip/hole
+        tear_type = random.choices(['corner', 'strip', 'hole'], weights=[50, 30, 20])[0]
 
         if tear_type == 'corner':
-            # 撕掉一个角
+            # 撕掉一个角 (size reduced: was w//2 → w//4)
             corner = random.choice(['tl', 'tr', 'bl', 'br'])
-            size_w = random.randint(w // 5, w // 2)
-            size_h = random.randint(h // 5, h // 2)
+            size_w = random.randint(w // 6, w // 3)
+            size_h = random.randint(h // 6, h // 3)
 
             if corner == 'tl':
                 pts = np.array([[0, 0], [size_w, 0], [0, size_h]], dtype=np.int32)
@@ -207,12 +208,12 @@ def apply_tear(img, num_tears=None):
         elif tear_type == 'strip':
             # 撕掉一条水平或垂直长条
             if random.random() < 0.5:
-                y1 = random.randint(h // 5, h // 2)
-                y2 = y1 + random.randint(10, h // 6)
+                y1 = random.randint(h // 5, 3 * h // 5)
+                y2 = y1 + random.randint(6, h // 10)
                 x1, x2 = 0, w
             else:
-                x1 = random.randint(w // 5, w // 2)
-                x2 = x1 + random.randint(10, w // 6)
+                x1 = random.randint(w // 5, 3 * w // 5)
+                x2 = x1 + random.randint(6, w // 10)
                 y1, y2 = 0, h
 
             # 不规则边缘 (加轻微波浪)
@@ -220,11 +221,11 @@ def apply_tear(img, num_tears=None):
             cv2.rectangle(result, (x1, y1), (x2, y2), (120, 120, 120), 1)
 
         elif tear_type == 'hole':
-            # 中间不规则洞
+            # 中间不规则洞 (radius reduced: was w//4 → w//5)
             cx = random.randint(w // 4, 3 * w // 4)
             cy = random.randint(h // 4, 3 * h // 4)
-            rx = random.randint(20, w // 4)
-            ry = random.randint(20, h // 4)
+            rx = random.randint(15, w // 5)
+            ry = random.randint(15, h // 5)
             angle = random.uniform(0, 360)
 
             # 不规则多边形洞

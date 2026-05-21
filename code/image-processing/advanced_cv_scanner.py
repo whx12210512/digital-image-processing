@@ -1377,36 +1377,46 @@ class AdvancedCVScanner:
                     variants.append((f'bridged_{ks}', cv2.cvtColor(bridged, cv2.COLOR_GRAY2BGR)))
         except: pass
 
-        # ---- V12: 水平/垂直分割解码 (for strip tears) ----
+        # ---- V12: 多碎片分割解码 (improved for edge_tear) ----
         try:
             gray3 = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-            # 检测全白行/列 (撕裂线)
             row_mean = np.mean(gray3, axis=1)
             col_mean = np.mean(gray3, axis=0)
-            tear_rows = np.where(row_mean > 250)[0]
-            tear_cols = np.where(col_mean > 250)[0]
-            # 如果有连续白行 >10px → 水平撕裂
-            if len(tear_rows) > 10:
-                # 找到最大间隙
+            tear_rows = np.where(row_mean > 248)[0]
+            tear_cols = np.where(col_mean > 248)[0]
+
+            # Horizontal splits: find all gap lines (>5px white), split at each
+            if len(tear_rows) > 5:
                 gaps = np.diff(tear_rows)
-                big_gaps = np.where(gaps > 10)[0]
-                if len(big_gaps) > 0:
-                    split_y = tear_rows[big_gaps[len(big_gaps)//2]]
-                    top = bgr[:split_y, :]
-                    bot = bgr[split_y:, :]
-                    for i, frag in enumerate([top, bot]):
-                        if frag.shape[0] > 30 and frag.shape[1] > 30:
-                            variants.append((f'hsplit_{i}', frag))
-            if len(tear_cols) > 10:
+                gap_starts = np.where(gaps > 5)[0]
+                for gs in gap_starts:
+                    split_y = int(tear_rows[gs] + tear_rows[gs + 1]) // 2
+                    for i, frag in enumerate([bgr[:split_y, :], bgr[split_y:, :]]):
+                        if frag.shape[0] > 25 and frag.shape[1] > 25:
+                            variants.append((f'hsplit_g{gs}_{i}', frag))
+
+            # Vertical splits: find all gap columns
+            if len(tear_cols) > 5:
                 gaps = np.diff(tear_cols)
-                big_gaps = np.where(gaps > 10)[0]
-                if len(big_gaps) > 0:
-                    split_x = tear_cols[big_gaps[len(big_gaps)//2]]
-                    left = bgr[:, :split_x]
-                    right = bgr[:, split_x:]
-                    for i, frag in enumerate([left, right]):
-                        if frag.shape[0] > 30 and frag.shape[1] > 30:
-                            variants.append((f'vsplit_{i}', frag))
+                gap_starts = np.where(gaps > 5)[0]
+                for gs in gap_starts:
+                    split_x = int(tear_cols[gs] + tear_cols[gs + 1]) // 2
+                    for i, frag in enumerate([bgr[:, :split_x], bgr[:, split_x:]]):
+                        if frag.shape[0] > 25 and frag.shape[1] > 25:
+                            variants.append((f'vsplit_g{gs}_{i}', frag))
+
+            # Multi-fragment: detect connected content regions (non-white blobs)
+            _, thresh = cv2.threshold(gray3, 248, 255, cv2.THRESH_BINARY_INV)
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+            # Extract individual content fragments larger than 1000px
+            for lab in range(1, num_labels):
+                area = stats[lab, cv2.CC_STAT_AREA]
+                if area > 1000:
+                    x, y, cw, ch = stats[lab, cv2.CC_STAT_LEFT], stats[lab, cv2.CC_STAT_TOP], \
+                                   stats[lab, cv2.CC_STAT_WIDTH], stats[lab, cv2.CC_STAT_HEIGHT]
+                    frag = bgr[y:y + ch, x:x + cw]
+                    if frag.shape[0] > 25 and frag.shape[1] > 25:
+                        variants.append((f'fragment_{lab}', frag))
         except: pass
 
         # ---- 解码所有变体 ----
