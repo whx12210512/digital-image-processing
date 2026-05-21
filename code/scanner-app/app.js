@@ -372,10 +372,321 @@ function grayscaleEnhance(imageData) {
 // Crash-safe jsQR wrapper — never use 'attemptBoth' because it crashes
 // on white-border images (inverted all-white → all-black → jsQR binarizer fails).
 function safeJsQR(data, w, h, opts) {
-    // Only use 'dontInvert' — any inversion we need is done manually
     try { return jsQR(data, w, h, { inversionAttempts: 'dontInvert' }); }
     catch { return null; }
 }
+
+// ============================================================================
+// Preprocess v2.0.3 — Ported from Python advanced_cv_scanner.py
+// CLAHE, Otsu, median filter, adaptive threshold sweep, morphological close
+// ============================================================================
+
+const Preprocess = {
+    /**
+     * Median filter on grayscale ImageData.
+     * Equivalent to cv2.medianBlur(gray, ks).
+     */
+    medianBlur(imageData, ks) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+        }
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        const r = Math.floor(ks / 2);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const vals = [];
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        vals.push(gray[ny * w + nx]);
+                    }
+                }
+                vals.sort((a, b) => a - b);
+                const v = vals[Math.floor(vals.length / 2)];
+                const di = (y * w + x) * 4;
+                dst[di] = dst[di + 1] = dst[di + 2] = v;
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Contrast Limited Adaptive Histogram Equalization (simplified).
+     * Splits image into tiles, equalizes each, bilinear interpolation.
+     * Equivalent to cv2.createCLAHE(clipLimit, tileGridSize).
+     */
+    clahe(imageData, clipLimit, tileW, tileH) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = Math.round(src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114);
+        }
+
+        const tw = tileW || 32, th = tileH || 32;
+        const nx = Math.ceil(w / tw), ny = Math.ceil(h / th);
+        const tiles = [];
+        for (let ty = 0; ty < ny; ty++) {
+            for (let tx = 0; tx < nx; tx++) {
+                const hist = new Array(256).fill(0);
+                const x0 = tx * tw, y0 = ty * th;
+                const x1 = Math.min(w, x0 + tw), y1 = Math.min(h, y0 + th);
+                let count = 0;
+                for (let y = y0; y < y1; y++) {
+                    for (let x = x0; x < x1; x++) {
+                        hist[gray[y * w + x]]++;
+                        count++;
+                    }
+                }
+                // Clip and redistribute
+                const clip = clipLimit || 2.0;
+                const clipThreshold = Math.floor((count / 256) * clip);
+                let excess = 0;
+                for (let i = 0; i < 256; i++) {
+                    if (hist[i] > clipThreshold) { excess += hist[i] - clipThreshold; hist[i] = clipThreshold; }
+                }
+                const redist = Math.floor(excess / 256);
+                for (let i = 0; i < 256; i++) hist[i] += redist;
+                // CDF
+                const cdf = new Float32Array(256);
+                cdf[0] = hist[0] / count;
+                for (let i = 1; i < 256; i++) cdf[i] = cdf[i - 1] + hist[i] / count;
+                tiles.push({ x0, y0, x1, y1, cdf });
+            }
+        }
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const v = gray[y * w + x];
+                // Find surrounding tiles and bilinear interpolate
+                const txf = (x + 0.5) / tw - 0.5, tyf = (y + 0.5) / th - 0.5;
+                const tx0 = clamp(Math.floor(txf), 0, nx - 1), ty0 = clamp(Math.floor(tyf), 0, ny - 1);
+                const tx1 = Math.min(tx0 + 1, nx - 1), ty1 = Math.min(ty0 + 1, ny - 1);
+                const fx = txf - tx0, fy = tyf - ty0;
+
+                const c00 = tiles[ty0 * nx + tx0].cdf[v];
+                const c10 = tiles[ty0 * nx + tx1].cdf[v];
+                const c01 = tiles[ty1 * nx + tx0].cdf[v];
+                const c11 = tiles[ty1 * nx + tx1].cdf[v];
+                const eq = Math.round(((c00 * (1 - fx) + c10 * fx) * (1 - fy) + (c01 * (1 - fx) + c11 * fx) * fy) * 255);
+
+                const di = (y * w + x) * 4;
+                dst[di] = dst[di + 1] = dst[di + 2] = eq;
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Otsu's method for global thresholding.
+     * Finds threshold that maximizes between-class variance.
+     */
+    otsuThreshold(imageData) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+        }
+
+        const hist = new Array(256).fill(0);
+        for (let i = 0; i < w * h; i++) hist[Math.round(gray[i])]++;
+
+        let sum = 0, sumB = 0, wB = 0, wF = 0, maxVar = 0, threshold = 128;
+        for (let i = 0; i < 256; i++) sum += i * hist[i];
+        const total = w * h;
+
+        for (let t = 0; t < 256; t++) {
+            wB += hist[t];
+            if (wB === 0) continue;
+            wF = total - wB;
+            if (wF === 0) break;
+            sumB += t * hist[t];
+            const mB = sumB / wB, mF = (sum - sumB) / wF;
+            const betweenVar = wB * wF * (mB - mF) * (mB - mF);
+            if (betweenVar > maxVar) { maxVar = betweenVar; threshold = t; }
+        }
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let i = 0; i < w * h; i++) {
+            const v = gray[i] > threshold ? 255 : 0;
+            const di = i * 4;
+            dst[di] = dst[di + 1] = dst[di + 2] = v;
+            dst[di + 3] = 255;
+        }
+        return out;
+    },
+
+    /**
+     * Adaptive threshold with Gaussian kernel.
+     * For each pixel, compares to weighted mean of neighbors.
+     */
+    adaptiveThreshold(imageData, blockSize, C) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+        }
+
+        // Gaussian kernel
+        const r = Math.floor(blockSize / 2);
+        const kernel = [];
+        const sigma = blockSize / 6;
+        let kernelSum = 0;
+        for (let dy = -r; dy <= r; dy++) {
+            for (let dx = -r; dx <= r; dx++) {
+                const wgt = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+                kernel.push(wgt);
+                kernelSum += wgt;
+            }
+        }
+        for (let i = 0; i < kernel.length; i++) kernel[i] /= kernelSum;
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let sum = 0;
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        sum += gray[ny * w + nx] * kernel[(dy + r) * blockSize + (dx + r)];
+                    }
+                }
+                const v = gray[y * w + x] > (sum - C) ? 255 : 0;
+                const di = (y * w + x) * 4;
+                dst[di] = dst[di + 1] = dst[di + 2] = v;
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Morphological close: dilate then erode.
+     * Reconnects broken bars in 1D barcodes.
+     * kernelShape: 'rect' | 'ellipse'
+     */
+    morphClose(imageData, kernelW, kernelH) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const bin = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            bin[i] = (src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114) < 128 ? 0 : 255;
+        }
+        const kw = kernelW || 7, kh = kernelH || 1;
+        const rx = Math.floor(kw / 2), ry = Math.floor(kh / 2);
+
+        // Dilate
+        const dilated = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let hasBlack = false;
+                for (let dy = -ry; dy <= ry; dy++) {
+                    for (let dx = -rx; dx <= rx; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        if (bin[ny * w + nx] === 0) { hasBlack = true; break; }
+                    }
+                    if (hasBlack) break;
+                }
+                dilated[y * w + x] = hasBlack ? 0 : 255;
+            }
+        }
+
+        // Erode
+        const closed = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let allBlack = true;
+                for (let dy = -ry; dy <= ry; dy++) {
+                    for (let dx = -rx; dx <= rx; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        if (dilated[ny * w + nx] !== 0) { allBlack = false; break; }
+                    }
+                    if (!allBlack) break;
+                }
+                closed[y * w + x] = allBlack ? 0 : 255;
+            }
+        }
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let i = 0; i < w * h; i++) {
+            dst[i * 4] = dst[i * 4 + 1] = dst[i * 4 + 2] = closed[i];
+            dst[i * 4 + 3] = 255;
+        }
+        return out;
+    },
+
+    /**
+     * Fast tier: most impactful variants for mobile performance.
+     * Ordered by impact (from Python gap analysis).
+     */
+    generateFastVariants(imageData) {
+        const variants = [];
+        const w = imageData.width, h = imageData.height;
+
+        // Otsu — critical for ink_data_pollution (-91.9% gap)
+        variants.push({ tag: 'otsu', data: this.otsuThreshold(imageData) });
+
+        // CLAHE — important for low contrast / noise
+        variants.push({ tag: 'clahe-c2', data: this.clahe(imageData, 2.0) });
+
+        // Key adaptive thresholds — for ink/corner/damage
+        for (const [bs, c] of [[31, 9], [41, 13]]) {
+            variants.push({ tag: `adap-${bs}-${c}`, data: this.adaptiveThreshold(imageData, bs, c) });
+        }
+
+        // Median denoise
+        variants.push({ tag: 'median3', data: this.medianBlur(imageData, 3) });
+
+        // Morphological close for barcode-like images
+        if (w > h * 1.2) {
+            variants.push({ tag: 'morphClose-5x1', data: this.morphClose(imageData, 5, 1) });
+            variants.push({ tag: 'morphClose-7x1', data: this.morphClose(imageData, 7, 1) });
+        }
+
+        return variants;
+    },
+
+    /**
+     * Full sweep: comprehensive variants for stubborn images.
+     * Only called if fast tier didn't find anything.
+     */
+    generateFullVariants(imageData) {
+        const variants = [];
+        const w = imageData.width, h = imageData.height;
+
+        // Remaining CLAHE
+        variants.push({ tag: 'clahe-c3', data: this.clahe(imageData, 3.0) });
+        const med3 = this.medianBlur(imageData, 3);
+        variants.push({ tag: 'med3+clahe', data: this.clahe(med3, 2.0) });
+
+        // Full adaptive threshold sweep
+        for (const bs of [21, 31, 41, 51]) {
+            for (const c of [3, 5, 9, 13]) {
+                const tag = `adap-${bs}-${c}`;
+                if (!variants.some(v => v.tag === tag)) {
+                    variants.push({ tag, data: this.adaptiveThreshold(imageData, bs, c) });
+                }
+            }
+        }
+
+        // Extended morphological
+        if (w > h * 1.2) {
+            for (const [kw, kh] of [[3, 1], [7, 3], [7, 5]]) {
+                variants.push({ tag: `morphClose-${kw}x${kh}`, data: this.morphClose(imageData, kw, kh) });
+            }
+        }
+
+        return variants;
+    }
+};
 
 function scanQrIterative(pixelData, w, h, label, maxIter) {
     const out = [];
@@ -459,6 +770,11 @@ async function decodeImageFile(file, scanFormat) {
     const wantBarcode = scanFormat === 'all' || scanFormat === 'barcode';
     const merged = [];
 
+    // ====== v2.0.3 Preprocessing variants (CLAHE, Otsu, adaptive, morph) ======
+    // Tiered approach: fast impactful variants first, full sweep only if needed
+    const fastVariants = Preprocess.generateFastVariants(imageData);
+    const fullVariants = Preprocess.generateFullVariants(imageData);
+
     // ====== v2.0.1 Geometric Correction ======
     // Generate corrected variants for cylinder/perspective distortion
     let correctedVariants = [];
@@ -509,9 +825,8 @@ async function decodeImageFile(file, scanFormat) {
         return results;
     }
 
-    // ----- Run corrected variants first (before raw image) -----
-    for (const variant of correctedVariants) {
-        // BarcodeDetector on variant
+    // Helper: decode a single variant with all engines
+    async function decodeVariant(variant) {
         if (wantQr || wantBarcode) {
             try {
                 const detected = await detectOnVariant(variant, wantQr, wantBarcode);
@@ -524,13 +839,31 @@ async function decodeImageFile(file, scanFormat) {
                 }
             } catch {}
         }
-        // jsQR on variant
         if (wantQr) {
             const jr = jsqrOnVariant(variant);
             for (const r of jr) {
                 if (r) insertUnique(merged, r);
             }
         }
+    }
+
+    // ----- Tier 1: Fast preprocessing (7 variants, ~700ms on mobile) -----
+    for (const variant of fastVariants) {
+        await decodeVariant(variant);
+        if (merged.length > 0) return merged;  // Found it — stop here
+    }
+
+    // ----- Tier 2: Geometric correction (cylinder/perspective) -----
+    for (const variant of correctedVariants) {
+        await decodeVariant(variant);
+        if (merged.length > 0) return merged;
+    }
+
+    // ----- Tier 3: Full preprocessing sweep (~25 variants, ~2.5s) -----
+    // Only reached for stubborn images (ink, pollution, heavy damage)
+    for (const variant of fullVariants) {
+        await decodeVariant(variant);
+        if (merged.length > 0) return merged;
     }
 
     // ====== BarcodeDetector: original image (already tried corrected variants) ======
