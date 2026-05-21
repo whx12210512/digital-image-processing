@@ -569,9 +569,102 @@ const Preprocess = {
     },
 
     /**
+     * Morphological opening: erode then dilate.
+     * Removes small dark spots (ink specks) while preserving large features.
+     * Critical for ink_data_pollution category.
+     */
+    morphOpen(imageData, kernelSize) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const bin = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            bin[i] = (src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114) < 128 ? 0 : 255;
+        }
+        const r = Math.floor((kernelSize || 3) / 2);
+
+        // Erode: if any neighbor is white, become white (remove small black dots)
+        const eroded = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let hasWhite = false;
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        if (bin[ny * w + nx] === 255) { hasWhite = true; break; }
+                    }
+                    if (hasWhite) break;
+                }
+                eroded[y * w + x] = hasWhite ? 255 : 0;
+            }
+        }
+
+        // Dilate: restore module edges
+        const opened = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let hasBlack = false;
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        if (eroded[ny * w + nx] === 0) { hasBlack = true; break; }
+                    }
+                    if (hasBlack) break;
+                }
+                opened[y * w + x] = hasBlack ? 0 : 255;
+            }
+        }
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let i = 0; i < w * h; i++) {
+            dst[i * 4] = dst[i * 4 + 1] = dst[i * 4 + 2] = opened[i];
+            dst[i * 4 + 3] = 255;
+        }
+        return out;
+    },
+
+    /**
+     * Simplified bilateral filter — spatial + range weighting.
+     * Smooths noise while preserving edges.
+     */
+    bilateralFilter(imageData, d, sigmaColor, sigmaSpace) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+        }
+
+        const dia = d || 7, sc = sigmaColor || 50, ss = sigmaSpace || 50;
+        const r = Math.floor(dia / 2);
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const centerVal = gray[y * w + x];
+                let sum = 0, weightSum = 0;
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        const val = gray[ny * w + nx];
+                        const spatialW = Math.exp(-(dx * dx + dy * dy) / (2 * ss * ss));
+                        const rangeW = Math.exp(-((val - centerVal) * (val - centerVal)) / (2 * sc * sc));
+                        const wgt = spatialW * rangeW;
+                        sum += val * wgt;
+                        weightSum += wgt;
+                    }
+                }
+                const v = Math.round(sum / (weightSum + 1e-6));
+                const di = (y * w + x) * 4;
+                dst[di] = dst[di + 1] = dst[di + 2] = v;
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
      * Morphological close: dilate then erode.
      * Reconnects broken bars in 1D barcodes.
-     * kernelShape: 'rect' | 'ellipse'
      */
     morphClose(imageData, kernelW, kernelH) {
         const w = imageData.width, h = imageData.height, src = imageData.data;
@@ -624,28 +717,51 @@ const Preprocess = {
     },
 
     /**
-     * Fast tier: most impactful variants for mobile performance.
-     * Ordered by impact (from Python gap analysis).
+     * Fast tier: most impactful variants ordered by diagnostic hit rate.
+     * median3 rescues the most images (92/210 for ink pollution) — must be first.
      */
     generateFastVariants(imageData) {
         const variants = [];
         const w = imageData.width, h = imageData.height;
 
-        // Otsu — critical for ink_data_pollution (-91.9% gap)
-        variants.push({ tag: 'otsu', data: this.otsuThreshold(imageData) });
+        // #1: Median denoise — highest hit rate across all damage types
+        variants.push({ tag: 'median3', data: this.medianBlur(imageData, 3) });
 
-        // CLAHE — important for low contrast / noise
+        // #2: Median(5) + Bilateral heavy denoise — critical for ink pollution (31 extra images)
+        const med5 = this.medianBlur(imageData, 5);
+        const med5Gray = new Float32Array(w * h);
+        const m5d = med5.data;
+        for (let i = 0; i < w * h; i++) {
+            med5Gray[i] = m5d[i * 4] * 0.299 + m5d[i * 4 + 1] * 0.587 + m5d[i * 4 + 2] * 0.114;
+        }
+        // Build ImageData from med5 gray for bilateral input
+        const med5ImgData = new ImageData(w, h);
+        const m5di = med5ImgData.data;
+        for (let i = 0; i < w * h; i++) {
+            const v = Math.round(med5Gray[i]);
+            m5di[i * 4] = m5di[i * 4 + 1] = m5di[i * 4 + 2] = v;
+            m5di[i * 4 + 3] = 255;
+        }
+        variants.push({ tag: 'med5+bilat', data: this.bilateralFilter(med5ImgData, 7, 50, 50) });
+
+        // #3: CLAHE — for low contrast / noise
         variants.push({ tag: 'clahe-c2', data: this.clahe(imageData, 2.0) });
 
-        // Key adaptive thresholds — for ink/corner/damage
+        // #4: Otsu — for data pollution
+        variants.push({ tag: 'otsu', data: this.otsuThreshold(imageData) });
+
+        // #5: Morphological opening — removes small ink specks (critical for QR ink pollution)
+        if (w < h * 2.0 && h < w * 2.0) {  // Square-ish → QR code
+            variants.push({ tag: 'morphOpen-3', data: this.morphOpen(imageData, 3) });
+            variants.push({ tag: 'morphOpen-5', data: this.morphOpen(imageData, 5) });
+        }
+
+        // #6: Key adaptive thresholds
         for (const [bs, c] of [[31, 9], [41, 13]]) {
             variants.push({ tag: `adap-${bs}-${c}`, data: this.adaptiveThreshold(imageData, bs, c) });
         }
 
-        // Median denoise
-        variants.push({ tag: 'median3', data: this.medianBlur(imageData, 3) });
-
-        // Morphological close for barcode-like images
+        // #7: Morphological close for barcode-like images
         if (w > h * 1.2) {
             variants.push({ tag: 'morphClose-5x1', data: this.morphClose(imageData, 5, 1) });
             variants.push({ tag: 'morphClose-7x1', data: this.morphClose(imageData, 7, 1) });
@@ -662,10 +778,19 @@ const Preprocess = {
         const variants = [];
         const w = imageData.width, h = imageData.height;
 
-        // Remaining CLAHE
+        // Remaining CLAHE and combos
         variants.push({ tag: 'clahe-c3', data: this.clahe(imageData, 3.0) });
         const med3 = this.medianBlur(imageData, 3);
-        variants.push({ tag: 'med3+clahe', data: this.clahe(med3, 2.0) });
+        const med3Gray = new Float32Array(w * h);
+        const m3d = med3.data;
+        for (let i = 0; i < w * h; i++) m3Gray[i] = m3d[i * 4];
+        const med3Img = new ImageData(w, h);
+        const m3di = med3Img.data;
+        for (let i = 0; i < w * h; i++) {
+            const v = Math.round(m3Gray[i]);
+            m3di[i*4]=m3di[i*4+1]=m3di[i*4+2]=v; m3di[i*4+3]=255;
+        }
+        variants.push({ tag: 'med3+clahe', data: this.clahe(med3Img, 2.0) });
 
         // Full adaptive threshold sweep
         for (const bs of [21, 31, 41, 51]) {
@@ -677,14 +802,29 @@ const Preprocess = {
             }
         }
 
-        // Extended morphological
+        // Extended morphological close (barcodes)
         if (w > h * 1.2) {
             for (const [kw, kh] of [[3, 1], [7, 3], [7, 5]]) {
                 variants.push({ tag: `morphClose-${kw}x${kh}`, data: this.morphClose(imageData, kw, kh) });
             }
         }
 
+        // Inverted adaptive threshold (catches white-on-black prints)
+        variants.push({ tag: 'adap-inv-31-9', data: this.invert(this.adaptiveThreshold(imageData, 31, 9)) });
+
         return variants;
+    },
+
+    /** Invert binary ImageData (255 ↔ 0). */
+    invert(imageData) {
+        const out = new ImageData(imageData.width, imageData.height);
+        const src = imageData.data, dst = out.data;
+        for (let i = 0; i < src.length; i += 4) {
+            const v = 255 - src[i];
+            dst[i] = dst[i + 1] = dst[i + 2] = v;
+            dst[i + 3] = 255;
+        }
+        return out;
     }
 };
 
