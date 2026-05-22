@@ -1110,150 +1110,92 @@ async function decodeImageFile(file, scanFormat) {
     const wantBarcode = scanFormat === 'all' || scanFormat === 'barcode';
     const merged = [];
 
-    // ====== v2.0.3 Preprocessing variants (CLAHE, Otsu, adaptive, morph) ======
-    // Tiered approach: fast impactful variants first, full sweep only if needed
-    const fastVariants = Preprocess.generateFastVariants(imageData);
-    const fullVariants = Preprocess.generateFullVariants(imageData);
-
-    // ====== v2.0.1 Geometric Correction ======
-    // Generate corrected variants for cylinder/perspective distortion
-    let correctedVariants = [];
-    if (w > h * 1.2) {
-        // Wide image: likely barcode — try cylinder unwarp + perspective normalize
-        correctedVariants.push({ tag: 'persp-norm', data: GeoCorrect.normalizePerspective(imageData) });
-        const cylVariants = GeoCorrect.unwarpBarcodeMulti(imageData);
-        for (const v of cylVariants) {
-            correctedVariants.push({ tag: `barcode-cyl-c${v.curvature.toFixed(2)}`, data: v.data });
-            // Also try cylinder unwarp followed by perspective normalize (combo)
-            correctedVariants.push({
-                tag: `cyl-c${v.curvature.toFixed(2)}+persp`,
-                data: GeoCorrect.normalizePerspective(v.data)
-            });
-        }
+    // Helper functions
+    function toCanvas(imgData) {
+        const cv = document.createElement('canvas'); cv.width = imgData.width; cv.height = imgData.height;
+        cv.getContext('2d').putImageData(imgData, 0, 0); return cv;
     }
-    if (wantQr && h > 40 && w > 40) {
-        const qrVariants = GeoCorrect.unwarpQRMulti(imageData);
-        for (const v of qrVariants) {
-            correctedVariants.push({ tag: `qr-cyl-c${v.curvature.toFixed(2)}`, data: v.data });
-        }
-    }
-
-    // ====== Fragment extraction (for edge_tear / torn images) ======
-    const fragments = GeoCorrect.extractFragments(imageData);
-    for (const frag of fragments) {
-        correctedVariants.push(frag);
-    }
-
-    // Fast jsQR-only decode on a variant (no BarcodeDetector — too slow on binarized images)
     function jsqrQuick(variant) {
         if (!wantQr) return false;
         const d = variant.data;
         const r = safeJsQR(d.data, d.width, d.height);
-        if (r && r.data) {
-            insertUnique(merged, { text: normalizeText(r.data), type: 'QR Code', confidence: `jsQR(${variant.tag})` });
-            return true;
-        }
-        // Inverted quick pass
+        if (r && r.data) { insertUnique(merged, { text: normalizeText(r.data), type: 'QR Code', confidence: `jsQR(${variant.tag})` }); return true; }
         const inv = inverted(d.data);
         const r2 = safeJsQR(inv, d.width, d.height);
-        if (r2 && r2.data) {
-            insertUnique(merged, { text: normalizeText(r2.data), type: 'QR Code', confidence: `jsQR(${variant.tag}/inv)` });
-            return true;
-        }
+        if (r2 && r2.data) { insertUnique(merged, { text: normalizeText(r2.data), type: 'QR Code', confidence: `jsQR(${variant.tag}/inv)` }); return true; }
         return false;
     }
-
-    // Run BarcodeDetector on a canvas (original or geometric variants only — clean images)
     async function bdOnCanvas(cv, tag) {
         if (!wantQr && !wantBarcode) return false;
         try {
             const detected = await runBarcodeDetector(cv, wantQr, wantBarcode);
             for (const b of detected) {
                 const isQr = b.format === 'qr_code' || b.format === 'QR Code';
-                if (!hasText(merged, b.rawValue)) {
-                    merged.push({ text: normalizeText(b.rawValue), type: isQr ? 'QR Code' : 'Barcode',
-                                  confidence: `BarcodeDetector(${tag})` });
-                }
+                if (!hasText(merged, b.rawValue)) merged.push({ text: normalizeText(b.rawValue), type: isQr ? 'QR Code' : 'Barcode', confidence: `BarcodeDetector(${tag})` });
             }
             return detected.length > 0;
         } catch { return false; }
     }
-
-    function toCanvas(imgData) {
-        const cv = document.createElement('canvas');
-        cv.width = imgData.width; cv.height = imgData.height;
-        cv.getContext('2d').putImageData(imgData, 0, 0);
-        return cv;
+    // Lazy variant generators — only called if Phase 1 fails (no variants created upfront!)
+    function getFastVariants() { return Preprocess.generateFastVariants(imageData); }
+    function getFullVariants() { return Preprocess.generateFullVariants(imageData); }
+    function getGeoVariants() {
+        const vars = [];
+        if (w > h * 1.2) {
+            vars.push({ tag: 'persp-norm', data: GeoCorrect.normalizePerspective(imageData) });
+            const cyl = GeoCorrect.unwarpBarcodeMulti(imageData);
+            for (const v of cyl) {
+                vars.push({ tag: `barcode-cyl-c${v.curvature.toFixed(2)}`, data: v.data });
+                vars.push({ tag: `cyl-c${v.curvature.toFixed(2)}+persp`, data: GeoCorrect.normalizePerspective(v.data) });
+            }
+        }
+        if (wantQr && h > 40 && w > 40) {
+            const qrV = GeoCorrect.unwarpQRMulti(imageData);
+            for (const v of qrV) vars.push({ tag: `qr-cyl-c${v.curvature.toFixed(2)}`, data: v.data });
+        }
+        const frags = GeoCorrect.extractFragments(imageData);
+        for (const f of frags) vars.push(f);
+        return vars;
     }
 
-    // ====== Phase 1: Original image (BarcodeDetector + jsQR, parallel) ======
-    // ====== Phase 1: Fast BD on original (most gallery images decode here) ======
+    // ====== Phase 1: Decode ORIGINAL image only (no variants generated) ======
     const bdPromise = bdOnCanvas(canvas, 'original');
-
-    // jsQR on original in parallel
     if (wantQr) {
         const enhanced = grayscaleEnhance(imageData);
-        for (const [label, data, maxIter] of [
-            ['jsQR', enhanced.data, 20], ['raw', imageData.data, 15],
-            ['inv', inverted(enhanced.data), 12], ['raw-inv', inverted(imageData.data), 10]
-        ]) {
+        for (const [label, data, maxIter] of [['jsQR', enhanced.data, 20], ['raw', imageData.data, 15], ['inv', inverted(enhanced.data), 12], ['raw-inv', inverted(imageData.data), 10]]) {
             const r = scanQrIterative(data, w, h, label, maxIter);
             if (r) { insertUnique(merged, r); break; }
         }
     }
-
-    // Await BD result — if original image decoded, skip entire pipeline
     await bdPromise;
+    if (merged.length > 0) return merged;  // Clean image — no variants generated!
+
+    // ====== Phase 2: Lazy generate + try fast preprocessing ======
+    const fastVariants = getFastVariants();
+    for (const v of fastVariants) { if (jsqrQuick(v)) break; }
     if (merged.length > 0) return merged;
 
-    // ====== Phase 2: Fast preprocessing (jsQR only, ~15 variants < 300ms total) ======
+    // ====== Phase 3: Lazy generate + try geometric correction ======
+    const geoVariants = getGeoVariants();
+    for (const v of geoVariants) { if (wantQr && jsqrQuick(v)) break; }
     if (merged.length === 0) {
-        for (const variant of fastVariants) {
-            if (jsqrQuick(variant)) break;
+        let idx = 0;
+        for (const v of geoVariants) {
+            const runBd = wantQr ? (idx % 2 === 0) : (idx < 3 || v.tag.includes('persp'));
+            if (runBd) { const cv = toCanvas(v.data); if (await bdOnCanvas(cv, v.tag)) break; }
+            idx++;
         }
     }
-
-    // ====== Phase 3: Geometric correction (BD on key variants, jsQR first) ======
-    if (merged.length === 0) {
-        // Try jsQR on all geometry variants first (fast, may work on mild distortion)
-        for (const variant of correctedVariants) {
-            if (wantQr && jsqrQuick(variant)) break;
-        }
-        // BD on sparse subset: every 2nd QR variant (covers full range with 1/2 cost)
-        if (merged.length === 0) {
-            let idx = 0;
-            for (const variant of correctedVariants) {
-                const runBd = wantQr ? (idx % 2 === 0) : (idx < 3 || variant.tag.includes('persp'));
-                if (runBd) {
-                    const cv = toCanvas(variant.data);
-                    if (await bdOnCanvas(cv, variant.tag)) break;
-                }
-                idx++;
-            }
-        }
-    }
-
-    // ====== Phase 4: Original BarcodeDetector result (awaited from Phase 1) ======
-    if (merged.length === 0) {
-        await bdPromise;  // Already ran, just awaiting
-    }
-
-    // ====== Phase 5: Full sweep (stubborn images only) ======
-    if (merged.length === 0) {
-        for (const variant of fullVariants) {
-            if (wantQr && jsqrQuick(variant)) break;
-        }
-        // If still nothing, try BD on full variants too
-        if (merged.length === 0) {
-            for (const variant of fullVariants.slice(0, 8)) {
-                const cv = toCanvas(variant.data);
-                if (await bdOnCanvas(cv, variant.tag)) break;
-            }
-        }
-    }
-
     if (merged.length > 0) return merged;
 
+    // ====== Phase 4: Lazy generate + try full sweep ======
+    const fullVariants = getFullVariants();
+    for (const v of fullVariants) { if (wantQr && jsqrQuick(v)) break; }
+    if (merged.length === 0) {
+        for (const v of fullVariants.slice(0, 8)) {
+            const cv = toCanvas(v.data); if (await bdOnCanvas(cv, v.tag)) break;
+        }
+    }
     if (merged.length > 0) return merged;
 
     // ====== Final fallback: Speckle removal + region scan ======

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'scanner-app-v2';
+const CACHE_NAME = 'scanner-app-v2.0.10';
 const ASSETS = [
   './',
   './index.html',
