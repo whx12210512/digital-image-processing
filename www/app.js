@@ -1152,24 +1152,22 @@ async function decodeImageFile(file, scanFormat) {
         }
     }
 
-    // ====== Phase 3: Geometric correction ======
+    // ====== Phase 3: Geometric correction (BD on key variants, jsQR first) ======
     if (merged.length === 0) {
-        if (wantQr) {
-            // QR: jsQR useless on cylinder distortion → BD on ALL curvature values
+        // Try jsQR on all geometry variants first (fast, may work on mild distortion)
+        for (const variant of correctedVariants) {
+            if (wantQr && jsqrQuick(variant)) break;
+        }
+        // BD on sparse subset: every 2nd QR variant (covers full range with 1/2 cost)
+        if (merged.length === 0) {
+            let idx = 0;
             for (const variant of correctedVariants) {
-                const cv = toCanvas(variant.data);
-                if (await bdOnCanvas(cv, variant.tag)) break;
-            }
-        } else {
-            // Barcode: jsQR first (works), BD on first 3 + perspective
-            let geoBdCount = 0;
-            for (const variant of correctedVariants) {
-                if (jsqrQuick(variant)) break;
-                if (geoBdCount < 3 || variant.tag.includes('persp')) {
+                const runBd = wantQr ? (idx % 2 === 0) : (idx < 3 || variant.tag.includes('persp'));
+                if (runBd) {
                     const cv = toCanvas(variant.data);
                     if (await bdOnCanvas(cv, variant.tag)) break;
-                    geoBdCount++;
                 }
+                idx++;
             }
         }
     }
@@ -1768,9 +1766,8 @@ const GeoCorrect = {
 
     unwarpQRMulti(imageData) {
         const results = [];
-        // Full-range sweep (19 values) — curvature estimation unreliable for padded images
-        // Generator uses curvature 0.08-0.35, sweep wider to cover edge cases
-        for (let c = 0.04; c <= 0.40; c += 0.02) {
+        // 10 curvature values (step 0.04) — balanced speed vs coverage
+        for (let c = 0.04; c <= 0.40; c += 0.04) {
             results.push({ curvature: c, data: this.unwarpQR(imageData, c) });
         }
         return results;
