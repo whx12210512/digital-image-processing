@@ -209,6 +209,20 @@ async function toggleFlashlight() {
     }
 }
 
+// Normalize decoded text: trim whitespace, collapse newlines, remove BOM
+function normalizeText(text) {
+    if (!text) return '';
+    return text.replace(/^\s+|\s+$/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n+/g, '\n').trim();
+}
+
+function sameText(a, b) {
+    return normalizeText(a) === normalizeText(b);
+}
+
+function hasText(arr, text) {
+    return arr.some(m => sameText(m.text, text));
+}
+
 function getScanFormats() {
     switch (state.scanFormat) {
         case 'qr':
@@ -231,11 +245,11 @@ function onScanSuccess(decodedText, decodedResult) {
     const type = formatName === 'qr_code' ? 'QR Code' : 'Barcode';
 
     // Skip duplicates during this scan session
-    if (state.cameraResults.some(r => r.text === decodedText)) return;
+    if (hasText(state.cameraResults, decodedText)) return;
 
     if (state.soundEnabled) playBeep();
 
-    state.cameraResults.push({ text: decodedText, type: type });
+    state.cameraResults.push({ text: normalizeText(decodedText), type: type });
     addToHistory(decodedText, type);
 
     const card = document.getElementById('resultCard');
@@ -1033,14 +1047,14 @@ async function decodeImageFile(file, scanFormat) {
         const d = variant.data;
         const r = safeJsQR(d.data, d.width, d.height);
         if (r && r.data) {
-            insertUnique(merged, { text: r.data, type: 'QR Code', confidence: `jsQR(${variant.tag})` });
+            insertUnique(merged, { text: normalizeText(r.data), type: 'QR Code', confidence: `jsQR(${variant.tag})` });
             return true;
         }
         // Inverted quick pass
         const inv = inverted(d.data);
         const r2 = safeJsQR(inv, d.width, d.height);
         if (r2 && r2.data) {
-            insertUnique(merged, { text: r2.data, type: 'QR Code', confidence: `jsQR(${variant.tag}/inv)` });
+            insertUnique(merged, { text: normalizeText(r2.data), type: 'QR Code', confidence: `jsQR(${variant.tag}/inv)` });
             return true;
         }
         return false;
@@ -1053,8 +1067,8 @@ async function decodeImageFile(file, scanFormat) {
             const detected = await runBarcodeDetector(cv, wantQr, wantBarcode);
             for (const b of detected) {
                 const isQr = b.format === 'qr_code' || b.format === 'QR Code';
-                if (!merged.some(m => m.text === b.rawValue)) {
-                    merged.push({ text: b.rawValue, type: isQr ? 'QR Code' : 'Barcode',
+                if (!hasText(merged, b.rawValue)) {
+                    merged.push({ text: normalizeText(b.rawValue), type: isQr ? 'QR Code' : 'Barcode',
                                   confidence: `BarcodeDetector(${tag})` });
                 }
             }
@@ -1301,7 +1315,8 @@ function inverted(data) {
 
 function insertUnique(dest, items) {
     for (const r of items) {
-        if (!dest.some(m => m.text === r.text)) {
+        if (!hasText(dest, r.text)) {
+            r.text = normalizeText(r.text);
             dest.push(r);
         }
     }
