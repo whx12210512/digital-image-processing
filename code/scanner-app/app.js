@@ -8,7 +8,7 @@
 const state = {
     scanner: null,
     isScanning: false,
-    scanFormat: 'all',       // 'all' | 'qr' | 'barcode'
+    scanFormat: 'qr',        // 'qr' | 'barcode' | 'all' (default QR to reduce false positives)
     facingMode: 'environment',
     flashlightOn: false,
     hasFlashlight: false,
@@ -271,10 +271,70 @@ function getScanFormats() {
     }
 }
 
+// --- Spatial validation: grab video frame, check variance in detection region ---
+function validateSpatialVariance() {
+    try {
+        const video = document.querySelector('#reader video');
+        if (!video || video.readyState < 2) return true; // Can't validate, accept
+        const cv = document.createElement('canvas');
+        const size = Math.min(video.videoWidth, video.videoHeight, 300);
+        cv.width = size; cv.height = size;
+        const ctx = cv.getContext('2d');
+        // Crop center region (where QR box is)
+        const sx = (video.videoWidth - size) / 2;
+        const sy = (video.videoHeight - size) / 2;
+        ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+        const img = ctx.getImageData(0, 0, size, size);
+
+        // Compute spatial variance in 8x8 blocks — real codes have high local variance
+        const block = 16, cols = Math.floor(size / block), rows = Math.floor(size / block);
+        let highVarBlocks = 0, totalBlocks = 0;
+        for (let by = 0; by < rows; by++) {
+            for (let bx = 0; bx < cols; bx++) {
+                let sum = 0, sumSq = 0, n = 0;
+                for (let dy = 0; dy < block && (by * block + dy) < size; dy++) {
+                    for (let dx = 0; dx < block && (bx * block + dx) < size; dx++) {
+                        const i = ((by * block + dy) * size + bx * block + dx) * 4;
+                        const g = img.data[i] * 0.299 + img.data[i + 1] * 0.587 + img.data[i + 2] * 0.114;
+                        sum += g; sumSq += g * g; n++;
+                    }
+                }
+                if (n > 20) {
+                    const variance = sumSq / n - (sum / n) * (sum / n);
+                    if (variance > 500) highVarBlocks++; // Real QR/barcode has high contrast
+                    totalBlocks++;
+                }
+            }
+        }
+        // At least 20% of blocks must have high variance (real code present)
+        return totalBlocks > 0 && highVarBlocks / totalBlocks >= 0.15;
+    } catch { return true; } // On error, accept (don't block real detections)
+}
+
+// --- String similarity: check if new text is a near-duplicate of existing ---
+function isNearDuplicate(text, existingTexts) {
+    const t = normalizeText(text);
+    if (!t) return false;
+    for (const ex of existingTexts) {
+        const e = normalizeText(ex);
+        if (!e) continue;
+        // Exact match
+        if (t === e) return true;
+        // Substring match (one contains the other)
+        if (t.length >= 8 && e.length >= 8 && (t.includes(e) || e.includes(t))) return true;
+        // Levenshtein-like: same prefix within 80%
+        if (t.length >= 12 && e.length >= 12) {
+            const minLen = Math.min(t.length, e.length);
+            const prefixLen = Math.floor(minLen * 0.7);
+            if (t.substring(0, prefixLen) === e.substring(0, prefixLen)) return true;
+        }
+    }
+    return false;
+}
+
 function onScanSuccess(decodedText, decodedResult) {
     if (!state.isScanning) return;
 
-    // Rate limit: ignore detections too close together (prevents false-positive spam)
     const now = Date.now();
     if (state.lastScanTime && now - state.lastScanTime < 800) return;
     state.lastScanTime = now;
@@ -283,11 +343,14 @@ function onScanSuccess(decodedText, decodedResult) {
     const type = formatName === 'qr_code' ? 'QR Code' : 'Barcode';
     const normalized = normalizeText(decodedText);
 
-    // Skip invalid/garbled results (pass format for barcode-specific validation)
     if (!isValidDecodedText(normalized, formatName)) return;
 
-    // Skip duplicates (check normalized text)
-    if (hasText(state.cameraResults, normalized)) return;
+    // Spatial validation: reject detections from uniform/textureless regions
+    if (!validateSpatialVariance()) return;
+
+    // Check near-duplicates (similar text already scanned)
+    const existingTexts = state.cameraResults.map(r => r.text);
+    if (isNearDuplicate(normalized, existingTexts)) return;
 
     if (state.soundEnabled) playBeep();
 
