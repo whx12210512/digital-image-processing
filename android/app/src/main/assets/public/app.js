@@ -1027,101 +1027,110 @@ async function decodeImageFile(file, scanFormat) {
         correctedVariants.push(frag);
     }
 
-    // Helper to run BarcodeDetector on a variant
-    async function detectOnVariant(variant, wantQr, wantBarcode) {
-        const cv = document.createElement('canvas');
-        cv.width = variant.data.width;
-        cv.height = variant.data.height;
-        cv.getContext('2d').putImageData(variant.data, 0, 0);
-        return await runBarcodeDetector(cv, wantQr, wantBarcode);
-    }
-
-    // Helper to run jsQR pass on a variant
-    function jsqrOnVariant(variant) {
+    // Fast jsQR-only decode on a variant (no BarcodeDetector — too slow on binarized images)
+    function jsqrQuick(variant) {
+        if (!wantQr) return false;
         const d = variant.data;
-        const enhanced = grayscaleEnhance(d);
-        const results = [];
-        for (const [label, data, maxIter] of [
-            ['enhanced', enhanced.data, 20],
-            ['raw', d.data, 15],
-            ['inv', inverted(enhanced.data), 12],
-            ['raw-inv', inverted(d.data), 10]
-        ]) {
-            const r = scanQrIterative(data, d.width, d.height, `jsQR(${variant.tag}/${label})`, maxIter);
-            if (r) results.push(r);
+        const r = safeJsQR(d.data, d.width, d.height);
+        if (r && r.data) {
+            insertUnique(merged, { text: r.data, type: 'QR Code', confidence: `jsQR(${variant.tag})` });
+            return true;
         }
-        return results;
+        // Inverted quick pass
+        const inv = inverted(d.data);
+        const r2 = safeJsQR(inv, d.width, d.height);
+        if (r2 && r2.data) {
+            insertUnique(merged, { text: r2.data, type: 'QR Code', confidence: `jsQR(${variant.tag}/inv)` });
+            return true;
+        }
+        return false;
     }
 
-    // Helper: decode a single variant with all engines
-    async function decodeVariant(variant) {
-        if (wantQr || wantBarcode) {
-            try {
-                const detected = await detectOnVariant(variant, wantQr, wantBarcode);
-                for (const b of detected) {
-                    const isQr = b.format === 'qr_code' || b.format === 'QR Code';
-                    if (!merged.some(m => m.text === b.rawValue)) {
-                        merged.push({ text: b.rawValue, type: isQr ? 'QR Code' : 'Barcode',
-                                      confidence: `BarcodeDetector(${variant.tag})` });
-                    }
+    // Run BarcodeDetector on a canvas (original or geometric variants only — clean images)
+    async function bdOnCanvas(cv, tag) {
+        if (!wantQr && !wantBarcode) return false;
+        try {
+            const detected = await runBarcodeDetector(cv, wantQr, wantBarcode);
+            for (const b of detected) {
+                const isQr = b.format === 'qr_code' || b.format === 'QR Code';
+                if (!merged.some(m => m.text === b.rawValue)) {
+                    merged.push({ text: b.rawValue, type: isQr ? 'QR Code' : 'Barcode',
+                                  confidence: `BarcodeDetector(${tag})` });
                 }
-            } catch {}
+            }
+            return detected.length > 0;
+        } catch { return false; }
+    }
+
+    function toCanvas(imgData) {
+        const cv = document.createElement('canvas');
+        cv.width = imgData.width; cv.height = imgData.height;
+        cv.getContext('2d').putImageData(imgData, 0, 0);
+        return cv;
+    }
+
+    // ====== Phase 1: Original image (BarcodeDetector + jsQR, parallel) ======
+    const bdPromise = bdOnCanvas(canvas, 'original');
+
+    // jsQR on original (runs while BarcodeDetector is pending)
+    if (wantQr) {
+        const enhanced = grayscaleEnhance(imageData);
+        for (const [label, data, maxIter] of [
+            ['jsQR', enhanced.data, 20], ['raw', imageData.data, 15],
+            ['inv', inverted(enhanced.data), 12], ['raw-inv', inverted(imageData.data), 10]
+        ]) {
+            const r = scanQrIterative(data, w, h, label, maxIter);
+            if (r) { insertUnique(merged, r); break; }
         }
-        if (wantQr) {
-            const jr = jsqrOnVariant(variant);
-            for (const r of jr) {
-                if (r) insertUnique(merged, r);
+    }
+
+    // ====== Phase 2: Fast preprocessing (jsQR only, ~15 variants < 300ms total) ======
+    if (merged.length === 0) {
+        for (const variant of fastVariants) {
+            if (jsqrQuick(variant)) break;
+        }
+    }
+
+    // ====== Phase 3: Geometric correction (BarcodeDetector only on important ones) ======
+    if (merged.length === 0) {
+        // Only run BD on the first 3 geometric variants (most likely to work)
+        let geoBdCount = 0;
+        for (const variant of correctedVariants) {
+            // jsQR first (fast)
+            if (wantQr && jsqrQuick(variant)) break;
+            // BarcodeDetector on first 3 or perspective-normalized ones
+            if (geoBdCount < 3 || variant.tag.includes('persp')) {
+                const cv = toCanvas(variant.data);
+                if (await bdOnCanvas(cv, variant.tag)) break;
+                geoBdCount++;
             }
         }
     }
 
-    // ----- Tier 1: Fast preprocessing (7 variants, ~700ms on mobile) -----
-    for (const variant of fastVariants) {
-        await decodeVariant(variant);
-        if (merged.length > 0) return merged;  // Found it — stop here
+    // ====== Phase 4: Original BarcodeDetector result (awaited from Phase 1) ======
+    if (merged.length === 0) {
+        await bdPromise;  // Already ran, just awaiting
     }
 
-    // ----- Tier 2: Geometric correction (cylinder/perspective) -----
-    for (const variant of correctedVariants) {
-        await decodeVariant(variant);
-        if (merged.length > 0) return merged;
-    }
-
-    // ----- Tier 3: Full preprocessing sweep (~25 variants, ~2.5s) -----
-    // Only reached for stubborn images (ink, pollution, heavy damage)
-    for (const variant of fullVariants) {
-        await decodeVariant(variant);
-        if (merged.length > 0) return merged;
-    }
-
-    // ====== BarcodeDetector: original image (already tried corrected variants) ======
-    const detected = await runBarcodeDetector(canvas, wantQr, wantBarcode);
-    for (const b of detected) {
-        const isQr = b.format === 'qr_code' || b.format === 'QR Code';
-        if (!merged.some(m => m.text === b.rawValue)) {
-            merged.push({ text: b.rawValue, type: isQr ? 'QR Code' : 'Barcode',
-                          confidence: 'BarcodeDetector ✓' });
+    // ====== Phase 5: Full sweep (stubborn images only) ======
+    if (merged.length === 0) {
+        for (const variant of fullVariants) {
+            if (wantQr && jsqrQuick(variant)) break;
+        }
+        // If still nothing, try BD on full variants too
+        if (merged.length === 0) {
+            for (const variant of fullVariants.slice(0, 8)) {
+                const cv = toCanvas(variant.data);
+                if (await bdOnCanvas(cv, variant.tag)) break;
+            }
         }
     }
 
-    // ====== jsQR crusafe passes (no attemptBoth — we handle inversion manually) ======
-    if (wantQr) {
-        const enhanced = grayscaleEnhance(imageData);
+    if (merged.length > 0) return merged;
 
-        // Normal enhanced
-        insertUnique(merged, scanQrIterative(enhanced.data, w, h, 'jsQR ✓', 25));
+    if (merged.length > 0) return merged;
 
-        // Raw colour
-        insertUnique(merged, scanQrIterative(imageData.data, w, h, 'jsQR (raw)', 25));
-
-        // Inverted enhanced
-        insertUnique(merged, scanQrIterative(inverted(enhanced.data), w, h, 'jsQR (inv)', 15));
-
-        // Inverted raw
-        insertUnique(merged, scanQrIterative(inverted(imageData.data), w, h, 'jsQR (raw inv)', 15));
-    }
-
-    // ====== Speckle removal: morphological opening to clear 1-4px ink dots ======
+    // ====== Final fallback: Speckle removal + region scan ======
     if (wantQr) {
         try {
             const specCanvas = document.createElement('canvas');
