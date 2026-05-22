@@ -223,16 +223,36 @@ function hasText(arr, text) {
     return arr.some(m => sameText(m.text, text));
 }
 
-// Filter garbled / invalid decoded text
-function isValidDecodedText(text) {
-    if (!text || text.length < 2) return false;
-    // Reject results with too many control characters or non-printable chars
-    const clean = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
-    if (clean.length < text.length * 0.5) return false;
-    // Reject extremely high-entropy short strings (random garbage)
-    if (text.length <= 6 && /[^\x20-\x7e]/.test(text)) return false;
-    // Reject strings that are purely non-ASCII garbage
-    if (text.length <= 10 && /^[^\x20-\x7e]+$/.test(text)) return false;
+// Filter garbled / invalid decoded text (strengthened for v2.0.8)
+function isValidDecodedText(text, format) {
+    if (!text || text.length < 3) return false;
+    // Reject null bytes and control chars
+    if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(text)) return false;
+    const t = text.trim();
+
+    // Barcode formats: validate by type
+    if (format === 'ean_13' || format === 'EAN-13') return /^\d{12,13}$/.test(t);
+    if (format === 'ean_8' || format === 'EAN-8') return /^\d{7,8}$/.test(t);
+    if (format === 'upc_a' || format === 'UPC-A') return /^\d{11,12}$/.test(t);
+    if (format === 'upc_e' || format === 'UPC-E') return /^\d{6,8}$/.test(t);
+    if (format === 'itf') return /^\d{6,}$/.test(t); // ITF is numeric, even length
+    if (format === 'codabar') return /^[0-9A-D\-:$/+.]{4,}$/.test(t);
+    if (format === 'code_93') return /^[A-Z0-9\-. $/+%]{3,}$/.test(t);
+    // Code-128, Code-39, QR Code: alphanumeric, URLs, text
+    if (format === 'code_128' || format === 'CODE-128') return /^[\x20-\x7e]{3,}$/.test(t);
+    if (format === 'code_39' || format === 'CODE-39') return /^[A-Z0-9\-. $/+%]{3,}$/.test(t);
+
+    // QR Code / unknown format: allow URLs, alphanumeric, CJK
+    // Must have reasonable structure
+    if (t.length < 4) return false;
+    // Reject purely random 4-5 char strings (typical false positive pattern)
+    if (t.length <= 5 && /^[A-Za-z0-9]{3,5}$/.test(t) && !/^[A-Z]{2}\d/.test(t)) {
+        // Check entropy: if random-looking (mixed case+digits in short string = suspicious)
+        const unique = new Set(t).size;
+        if (unique >= t.length * 0.8 && t.length <= 5) return false;
+    }
+    // Reject strings that are only special characters
+    if (/^[^a-zA-Z0-9一-鿿]{3,}$/.test(t)) return false;
     return true;
 }
 
@@ -254,13 +274,17 @@ function getScanFormats() {
 function onScanSuccess(decodedText, decodedResult) {
     if (!state.isScanning) return;
 
-    const normalized = normalizeText(decodedText);
-
-    // Skip invalid/garbled results
-    if (!isValidDecodedText(normalized)) return;
+    // Rate limit: ignore detections too close together (prevents false-positive spam)
+    const now = Date.now();
+    if (state.lastScanTime && now - state.lastScanTime < 800) return;
+    state.lastScanTime = now;
 
     const formatName = decodedResult.result.format?.formatName || 'unknown';
     const type = formatName === 'qr_code' ? 'QR Code' : 'Barcode';
+    const normalized = normalizeText(decodedText);
+
+    // Skip invalid/garbled results (pass format for barcode-specific validation)
+    if (!isValidDecodedText(normalized, formatName)) return;
 
     // Skip duplicates (check normalized text)
     if (hasText(state.cameraResults, normalized)) return;
@@ -1345,7 +1369,7 @@ function inverted(data) {
 function insertUnique(dest, items) {
     for (const r of items) {
         const text = normalizeText(r.text);
-        if (!isValidDecodedText(text)) continue;
+        if (!isValidDecodedText(text, null)) continue;
         if (!hasText(dest, text)) {
             r.text = text;
             dest.push(r);
