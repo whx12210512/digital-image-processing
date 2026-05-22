@@ -348,30 +348,20 @@ function onScanSuccess(decodedText, decodedResult) {
     // Spatial validation: reject detections from uniform/textureless regions
     if (!validateSpatialVariance()) return;
 
-    // Check near-duplicates (similar text already scanned)
-    const existingTexts = state.cameraResults.map(r => r.text);
-    if (isNearDuplicate(normalized, existingTexts)) return;
+    // Skip if same as the currently displayed result
+    if (state.cameraResults.length === 1 && isNearDuplicate(normalized, [state.cameraResults[0].text])) return;
 
     if (state.soundEnabled) playBeep();
 
-    state.cameraResults.push({ text: normalized, type: type });
-    addToHistory(decodedText, type);
+    // Camera scanning: always show only the LATEST single result
+    // (multi-result list is for image file scanning, where multiple codes in one photo makes sense)
+    state.cameraResults = [{ text: normalized, type: type }];
+    addToHistory(normalized, type);
 
     const card = document.getElementById('resultCard');
     card.style.display = 'block';
-
-    // Limit camera results to 8 to prevent spam
-    if (state.cameraResults.length > 8) {
-        state.cameraResults.shift();
-    }
-
-    if (state.cameraResults.length === 1) {
-        displayResult(normalized, type, 'resultCard', 'resultType', 'resultContent', 'resultConfidence');
-        showToast('已扫描 1 个, 继续扫描中...');
-    } else {
-        card.innerHTML = buildMultiSelectHtml(state.cameraResults);
-        showToast(`已扫描 ${state.cameraResults.length} 个, 点击查看详情`);
-    }
+    displayResultHtml(card, normalized, type, 'resultType', 'resultContent', 'resultConfidence');
+    showToast(`已扫描: ${normalized.length > 30 ? normalized.substring(0, 30) + '...' : normalized}`);
 }
 
 function selectMultiResult(index) {
