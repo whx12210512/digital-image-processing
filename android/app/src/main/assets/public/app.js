@@ -176,7 +176,7 @@ async function startScan() {
             const capabilities = state.scanner.getRunningTrackCapabilities();
             if (capabilities && capabilities.torch) {
                 state.hasFlashlight = true;
-                document.getElementById('btnFlashlight').style.display = 'flex';
+                document.getElementById('btnFlashlight').disabled = false;
             }
         } catch {
             // Flashlight not available on this device
@@ -427,8 +427,8 @@ function resetScanUI() {
     document.getElementById('scanPlaceholder').style.display = 'flex';
     document.getElementById('btnStartScan').style.display = 'flex';
     document.getElementById('btnStopScan').style.display = 'none';
-    document.getElementById('btnFlashlight').style.display = 'none';
     document.getElementById('btnFlashlight').classList.remove('active');
+    document.getElementById('btnFlashlight').disabled = true;
     state.flashlightOn = false;
     state.hasFlashlight = false;
 }
@@ -473,7 +473,10 @@ async function scanImageFile(file, cardId, typeId, contentId, confidenceId, isGa
         }
     } catch (err) {
         console.error('Image scan error:', err);
-        showToast('识别失败: ' + err.message);
+        // Only show error for actual failures (not "no results")
+        if (err.message && err.message !== 'No barcode found') {
+            showToast('识别出错，请重试');
+        }
     }
 }
 
@@ -1184,9 +1187,10 @@ async function decodeImageFile(file, scanFormat) {
     }
 
     // ====== Phase 1: Original image (BarcodeDetector + jsQR, parallel) ======
+    // ====== Phase 1: Fast BD on original (most gallery images decode here) ======
     const bdPromise = bdOnCanvas(canvas, 'original');
 
-    // jsQR on original (runs while BarcodeDetector is pending)
+    // jsQR on original in parallel
     if (wantQr) {
         const enhanced = grayscaleEnhance(imageData);
         for (const [label, data, maxIter] of [
@@ -1197,6 +1201,10 @@ async function decodeImageFile(file, scanFormat) {
             if (r) { insertUnique(merged, r); break; }
         }
     }
+
+    // Await BD result — if original image decoded, skip entire pipeline
+    await bdPromise;
+    if (merged.length > 0) return merged;
 
     // ====== Phase 2: Fast preprocessing (jsQR only, ~15 variants < 300ms total) ======
     if (merged.length === 0) {

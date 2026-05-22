@@ -245,6 +245,9 @@ html, body {
     cursor: pointer; transition: all 0.2s;
 }
 .btn-icon-round:active { background: #e8eaed; }
+.btn-icon-round:disabled {
+    opacity: 0.35; cursor: not-allowed;
+}
 .btn-icon-round.active {
     background: #fef3c7; color: #f59e0b;
     border-color: #f59e0b;
