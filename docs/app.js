@@ -10,6 +10,8 @@ const state = {
     isScanning: false,
     scanFormat: 'all',       // 'all' | 'qr' | 'barcode'
     facingMode: 'environment',
+    flashlightOn: false,
+    hasFlashlight: false,
     soundEnabled: true,
     autoRedirect: true,
     cameraResults: [],
@@ -99,6 +101,7 @@ function setupTabs() {
 function setupButtons() {
     document.getElementById('btnStartScan').addEventListener('click', startScan);
     document.getElementById('btnStopScan').addEventListener('click', stopScan);
+    document.getElementById('btnFlashlight').addEventListener('click', toggleFlashlight);
     document.getElementById('btnUpload').addEventListener('click', () => {
         document.getElementById('fileInput').click();
     });
@@ -153,7 +156,6 @@ async function startScan() {
             formatsToSupport: formatsToSupport,
         };
 
-        // Configure based on scan format
         if (state.scanFormat === 'barcode') {
             config.qrbox = { width: 300, height: 150 };
         }
@@ -168,11 +170,90 @@ async function startScan() {
             onScanSuccess,
             onScanFailure
         );
+
+        // Check flashlight availability after camera starts
+        try {
+            const capabilities = state.scanner.getRunningTrackCapabilities();
+            if (capabilities && capabilities.torch) {
+                state.hasFlashlight = true;
+                document.getElementById('btnFlashlight').disabled = false;
+            }
+        } catch {
+            // Flashlight not available on this device
+        }
     } catch (err) {
         console.error('Camera start error:', err);
         showToast('无法打开摄像头: ' + (err.message || '权限不足'));
         resetScanUI();
     }
+}
+
+async function toggleFlashlight() {
+    if (!state.isScanning || !state.hasFlashlight) return;
+    try {
+        state.flashlightOn = !state.flashlightOn;
+        await state.scanner.applyVideoConstraints({
+            advanced: [{ torch: state.flashlightOn }]
+        });
+        const btn = document.getElementById('btnFlashlight');
+        if (state.flashlightOn) {
+            btn.classList.add('active');
+            btn.title = '关闭手电筒';
+        } else {
+            btn.classList.remove('active');
+            btn.title = '打开手电筒';
+        }
+    } catch {
+        showToast('手电筒不可用');
+        state.flashlightOn = false;
+    }
+}
+
+// Normalize decoded text: trim whitespace, collapse newlines, remove BOM
+function normalizeText(text) {
+    if (!text) return '';
+    return text.replace(/^\s+|\s+$/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n+/g, '\n').trim();
+}
+
+function sameText(a, b) {
+    return normalizeText(a) === normalizeText(b);
+}
+
+function hasText(arr, text) {
+    return arr.some(m => sameText(m.text, text));
+}
+
+// Filter garbled / invalid decoded text (strengthened for v2.0.8)
+function isValidDecodedText(text, format) {
+    if (!text || text.length < 3) return false;
+    // Reject null bytes and control chars
+    if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(text)) return false;
+    const t = text.trim();
+
+    // Barcode formats: validate by type
+    if (format === 'ean_13' || format === 'EAN-13') return /^\d{12,13}$/.test(t);
+    if (format === 'ean_8' || format === 'EAN-8') return /^\d{7,8}$/.test(t);
+    if (format === 'upc_a' || format === 'UPC-A') return /^\d{11,12}$/.test(t);
+    if (format === 'upc_e' || format === 'UPC-E') return /^\d{6,8}$/.test(t);
+    if (format === 'itf') return /^\d{6,}$/.test(t); // ITF is numeric, even length
+    if (format === 'codabar') return /^[0-9A-D\-:$/+.]{4,}$/.test(t);
+    if (format === 'code_93') return /^[A-Z0-9\-. $/+%]{3,}$/.test(t);
+    // Code-128, Code-39, QR Code: alphanumeric, URLs, text
+    if (format === 'code_128' || format === 'CODE-128') return /^[\x20-\x7e]{3,}$/.test(t);
+    if (format === 'code_39' || format === 'CODE-39') return /^[A-Z0-9\-. $/+%]{3,}$/.test(t);
+
+    // QR Code / unknown format: allow URLs, alphanumeric, CJK
+    // Must have reasonable structure
+    if (t.length < 4) return false;
+    // Reject purely random 4-5 char strings (typical false positive pattern)
+    if (t.length <= 5 && /^[A-Za-z0-9]{3,5}$/.test(t) && !/^[A-Z]{2}\d/.test(t)) {
+        // Check entropy: if random-looking (mixed case+digits in short string = suspicious)
+        const unique = new Set(t).size;
+        if (unique >= t.length * 0.8 && t.length <= 5) return false;
+    }
+    // Reject strings that are only special characters
+    if (/^[^a-zA-Z0-9一-鿿]{3,}$/.test(t)) return false;
+    return true;
 }
 
 function getScanFormats() {
@@ -190,30 +271,132 @@ function getScanFormats() {
     }
 }
 
+// --- Spatial validation: grab video frame, check variance in detection region ---
+function validateSpatialVariance() {
+    try {
+        const video = document.querySelector('#reader video');
+        if (!video || video.readyState < 2) return true; // Can't validate, accept
+        const cv = document.createElement('canvas');
+        const size = Math.min(video.videoWidth, video.videoHeight, 300);
+        cv.width = size; cv.height = size;
+        const ctx = cv.getContext('2d');
+        // Crop center region (where QR box is)
+        const sx = (video.videoWidth - size) / 2;
+        const sy = (video.videoHeight - size) / 2;
+        ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+        const img = ctx.getImageData(0, 0, size, size);
+
+        // Compute spatial variance in 8x8 blocks — real codes have high local variance
+        const block = 16, cols = Math.floor(size / block), rows = Math.floor(size / block);
+        let highVarBlocks = 0, totalBlocks = 0;
+        for (let by = 0; by < rows; by++) {
+            for (let bx = 0; bx < cols; bx++) {
+                let sum = 0, sumSq = 0, n = 0;
+                for (let dy = 0; dy < block && (by * block + dy) < size; dy++) {
+                    for (let dx = 0; dx < block && (bx * block + dx) < size; dx++) {
+                        const i = ((by * block + dy) * size + bx * block + dx) * 4;
+                        const g = img.data[i] * 0.299 + img.data[i + 1] * 0.587 + img.data[i + 2] * 0.114;
+                        sum += g; sumSq += g * g; n++;
+                    }
+                }
+                if (n > 20) {
+                    const variance = sumSq / n - (sum / n) * (sum / n);
+                    if (variance > 500) highVarBlocks++; // Real QR/barcode has high contrast
+                    totalBlocks++;
+                }
+            }
+        }
+        // At least 20% of blocks must have high variance (real code present)
+        return totalBlocks > 0 && highVarBlocks / totalBlocks >= 0.15;
+    } catch { return true; } // On error, accept (don't block real detections)
+}
+
+// --- String similarity: check if new text is a near-duplicate of existing ---
+function isNearDuplicate(text, existingTexts) {
+    const t = normalizeText(text);
+    if (!t) return false;
+    for (const ex of existingTexts) {
+        const e = normalizeText(ex);
+        if (!e) continue;
+        // Exact match
+        if (t === e) return true;
+        // Substring match (one contains the other)
+        if (t.length >= 8 && e.length >= 8 && (t.includes(e) || e.includes(t))) return true;
+        // Levenshtein-like: same prefix within 80%
+        if (t.length >= 12 && e.length >= 12) {
+            const minLen = Math.min(t.length, e.length);
+            const prefixLen = Math.floor(minLen * 0.7);
+            if (t.substring(0, prefixLen) === e.substring(0, prefixLen)) return true;
+        }
+    }
+    return false;
+}
+
 function onScanSuccess(decodedText, decodedResult) {
     if (!state.isScanning) return;
 
+    const now = Date.now();
+    if (state.lastScanTime && now - state.lastScanTime < 800) return;
+    state.lastScanTime = now;
+
     const formatName = decodedResult.result.format?.formatName || 'unknown';
     const type = formatName === 'qr_code' ? 'QR Code' : 'Barcode';
+    const normalized = normalizeText(decodedText);
 
-    // Skip duplicates during this scan session
-    if (state.cameraResults.some(r => r.text === decodedText)) return;
+    if (!isValidDecodedText(normalized, formatName)) return;
+
+    // Spatial validation: reject detections from uniform/textureless regions
+    if (!validateSpatialVariance()) return;
+
+    // Skip if same as the currently displayed result
+    if (state.cameraResults.length === 1 && isNearDuplicate(normalized, [state.cameraResults[0].text])) return;
 
     if (state.soundEnabled) playBeep();
 
-    state.cameraResults.push({ text: decodedText, type: type });
-    addToHistory(decodedText, type);
+    // Camera scanning: always show only the LATEST single result
+    // (multi-result list is for image file scanning, where multiple codes in one photo makes sense)
+    state.cameraResults = [{ text: normalized, type: type }];
+    addToHistory(normalized, type);
 
     const card = document.getElementById('resultCard');
     card.style.display = 'block';
+    displayResultHtml(card, normalized, type, 'resultType', 'resultContent', 'resultConfidence');
+    showToast(`已扫描: ${normalized.length > 30 ? normalized.substring(0, 30) + '...' : normalized}`);
+}
 
-    if (state.cameraResults.length === 1) {
-        displayResult(decodedText, type, 'resultCard', 'resultType', 'resultContent', 'resultConfidence');
-        showToast('扫描到 1 个, 继续扫描中...');
-    } else {
-        card.innerHTML = buildMultiResultHtml(state.cameraResults);
-        showToast(`扫描到 ${state.cameraResults.length} 个结果`);
-    }
+function selectMultiResult(index) {
+    const r = state.cameraResults[index];
+    if (!r) return;
+    const card = document.getElementById('resultCard');
+    displayResultHtml(card, r.text, r.type, 'resultType', 'resultContent', 'resultConfidence');
+    // Add a "back to list" button
+    const backBtn = document.createElement('button');
+    backBtn.className = 'btn-sm';
+    backBtn.style.cssText = 'margin-top:8px;';
+    backBtn.textContent = '← 返回列表';
+    backBtn.onclick = () => {
+        card.innerHTML = buildMultiSelectHtml(state.cameraResults);
+    };
+    card.querySelector('.result-actions')?.appendChild(backBtn);
+}
+
+function displayResultHtml(card, text, type, typeId, contentId, confidenceId) {
+    const url = isUrl(text);
+    card.innerHTML = `
+        <div class="result-header">
+            <span class="badge ${type === 'QR Code' ? '' : 'barcode'}">${type}</span>
+            <span class="confidence"></span>
+            <button onclick="this.closest('.result-card').style.display='none'" class="icon-btn-sm">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+        <div class="result-content" style="font-size:20px;font-family:monospace;word-break:break-all;">${escapeHtml(text)}</div>
+        <div class="result-actions">
+            <button id="btnCopy" class="btn-sm" onclick="navigator.clipboard.writeText('${escapeHtml(text).replace(/'/g, "\\'")}');showToast('已复制')">复制</button>
+            ${url ? `<button id="btnOpenUrl" class="btn-sm" onclick="window.open('${escapeHtml(text)}','_blank')">打开链接</button>` : ''}
+        </div>
+    `;
+    state.currentResult = text;
 }
 
 function onScanFailure(error) {
@@ -244,6 +427,10 @@ function resetScanUI() {
     document.getElementById('scanPlaceholder').style.display = 'flex';
     document.getElementById('btnStartScan').style.display = 'flex';
     document.getElementById('btnStopScan').style.display = 'none';
+    document.getElementById('btnFlashlight').classList.remove('active');
+    document.getElementById('btnFlashlight').disabled = true;
+    state.flashlightOn = false;
+    state.hasFlashlight = false;
 }
 
 // ============ Image File Scanner ============
@@ -286,29 +473,34 @@ async function scanImageFile(file, cardId, typeId, contentId, confidenceId, isGa
         }
     } catch (err) {
         console.error('Image scan error:', err);
-        showToast('识别失败: ' + err.message);
+        // Only show error for actual failures (not "no results")
+        if (err.message && err.message !== 'No barcode found') {
+            showToast('识别出错，请重试');
+        }
     }
 }
 
 function buildMultiResultHtml(results) {
+    return buildMultiSelectHtml(results);
+}
+
+function buildMultiSelectHtml(results) {
     return `
         <div class="result-header">
             <span class="badge" style="background:#1a73e8;">${results.length} 个结果</span>
-            <button onclick="this.parentElement.parentElement.style.display='none'" class="icon-btn-sm">
+            <span style="font-size:12px;color:#888;">点击查看详情</span>
+            <button onclick="this.closest('.result-card').style.display='none'" class="icon-btn-sm">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
         </div>
         ${results.map((r, i) => `
-            <div class="multi-result-item">
+            <div class="multi-result-item" onclick="selectMultiResult(${i})" style="cursor:pointer;">
                 <div class="mri-header">
+                    <span class="mri-index">● ${i + 1}</span>
                     <span class="badge ${r.type === 'QR Code' ? '' : 'barcode'}">${r.type}</span>
-                    <span class="mri-index">#${i + 1}</span>
                 </div>
-                <div class="result-content" style="font-size:15px;font-family:monospace;">${escapeHtml(r.text)}</div>
-                <div class="result-actions">
-                    <button onclick="event.stopPropagation();navigator.clipboard.writeText('${escapeHtml(r.text).replace(/'/g, "\\'")}');showToast('已复制')" class="btn-sm">复制</button>
-                    ${isUrl(r.text) ? `<button onclick="event.stopPropagation();window.open('${escapeHtml(r.text)}','_blank')" class="btn-sm">打开链接</button>` : ''}
-                </div>
+                <div class="result-content" style="font-size:14px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.text)}</div>
+                <div style="text-align:right;color:#1a73e8;font-size:12px;">点击查看 →</div>
             </div>
         `).join('')}
     `;
@@ -372,10 +564,469 @@ function grayscaleEnhance(imageData) {
 // Crash-safe jsQR wrapper — never use 'attemptBoth' because it crashes
 // on white-border images (inverted all-white → all-black → jsQR binarizer fails).
 function safeJsQR(data, w, h, opts) {
-    // Only use 'dontInvert' — any inversion we need is done manually
     try { return jsQR(data, w, h, { inversionAttempts: 'dontInvert' }); }
     catch { return null; }
 }
+
+// ============================================================================
+// Preprocess v2.0.3 — Ported from Python advanced_cv_scanner.py
+// CLAHE, Otsu, median filter, adaptive threshold sweep, morphological close
+// ============================================================================
+
+const Preprocess = {
+    /**
+     * Median filter on grayscale ImageData.
+     * Equivalent to cv2.medianBlur(gray, ks).
+     */
+    medianBlur(imageData, ks) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+        }
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        const r = Math.floor(ks / 2);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const vals = [];
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        vals.push(gray[ny * w + nx]);
+                    }
+                }
+                vals.sort((a, b) => a - b);
+                const v = vals[Math.floor(vals.length / 2)];
+                const di = (y * w + x) * 4;
+                dst[di] = dst[di + 1] = dst[di + 2] = v;
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Contrast Limited Adaptive Histogram Equalization (simplified).
+     * Splits image into tiles, equalizes each, bilinear interpolation.
+     * Equivalent to cv2.createCLAHE(clipLimit, tileGridSize).
+     */
+    clahe(imageData, clipLimit, tileW, tileH) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = Math.round(src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114);
+        }
+
+        const tw = tileW || 32, th = tileH || 32;
+        const nx = Math.ceil(w / tw), ny = Math.ceil(h / th);
+        const tiles = [];
+        for (let ty = 0; ty < ny; ty++) {
+            for (let tx = 0; tx < nx; tx++) {
+                const hist = new Array(256).fill(0);
+                const x0 = tx * tw, y0 = ty * th;
+                const x1 = Math.min(w, x0 + tw), y1 = Math.min(h, y0 + th);
+                let count = 0;
+                for (let y = y0; y < y1; y++) {
+                    for (let x = x0; x < x1; x++) {
+                        hist[gray[y * w + x]]++;
+                        count++;
+                    }
+                }
+                // Clip and redistribute
+                const clip = clipLimit || 2.0;
+                const clipThreshold = Math.floor((count / 256) * clip);
+                let excess = 0;
+                for (let i = 0; i < 256; i++) {
+                    if (hist[i] > clipThreshold) { excess += hist[i] - clipThreshold; hist[i] = clipThreshold; }
+                }
+                const redist = Math.floor(excess / 256);
+                for (let i = 0; i < 256; i++) hist[i] += redist;
+                // CDF
+                const cdf = new Float32Array(256);
+                cdf[0] = hist[0] / count;
+                for (let i = 1; i < 256; i++) cdf[i] = cdf[i - 1] + hist[i] / count;
+                tiles.push({ x0, y0, x1, y1, cdf });
+            }
+        }
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const v = gray[y * w + x];
+                // Find surrounding tiles and bilinear interpolate
+                const txf = (x + 0.5) / tw - 0.5, tyf = (y + 0.5) / th - 0.5;
+                const tx0 = clamp(Math.floor(txf), 0, nx - 1), ty0 = clamp(Math.floor(tyf), 0, ny - 1);
+                const tx1 = Math.min(tx0 + 1, nx - 1), ty1 = Math.min(ty0 + 1, ny - 1);
+                const fx = txf - tx0, fy = tyf - ty0;
+
+                const c00 = tiles[ty0 * nx + tx0].cdf[v];
+                const c10 = tiles[ty0 * nx + tx1].cdf[v];
+                const c01 = tiles[ty1 * nx + tx0].cdf[v];
+                const c11 = tiles[ty1 * nx + tx1].cdf[v];
+                const eq = Math.round(((c00 * (1 - fx) + c10 * fx) * (1 - fy) + (c01 * (1 - fx) + c11 * fx) * fy) * 255);
+
+                const di = (y * w + x) * 4;
+                dst[di] = dst[di + 1] = dst[di + 2] = eq;
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Otsu's method for global thresholding.
+     * Finds threshold that maximizes between-class variance.
+     */
+    otsuThreshold(imageData) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+        }
+
+        const hist = new Array(256).fill(0);
+        for (let i = 0; i < w * h; i++) hist[Math.round(gray[i])]++;
+
+        let sum = 0, sumB = 0, wB = 0, wF = 0, maxVar = 0, threshold = 128;
+        for (let i = 0; i < 256; i++) sum += i * hist[i];
+        const total = w * h;
+
+        for (let t = 0; t < 256; t++) {
+            wB += hist[t];
+            if (wB === 0) continue;
+            wF = total - wB;
+            if (wF === 0) break;
+            sumB += t * hist[t];
+            const mB = sumB / wB, mF = (sum - sumB) / wF;
+            const betweenVar = wB * wF * (mB - mF) * (mB - mF);
+            if (betweenVar > maxVar) { maxVar = betweenVar; threshold = t; }
+        }
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let i = 0; i < w * h; i++) {
+            const v = gray[i] > threshold ? 255 : 0;
+            const di = i * 4;
+            dst[di] = dst[di + 1] = dst[di + 2] = v;
+            dst[di + 3] = 255;
+        }
+        return out;
+    },
+
+    /**
+     * Adaptive threshold with Gaussian kernel.
+     * For each pixel, compares to weighted mean of neighbors.
+     */
+    adaptiveThreshold(imageData, blockSize, C) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+        }
+
+        // Gaussian kernel
+        const r = Math.floor(blockSize / 2);
+        const kernel = [];
+        const sigma = blockSize / 6;
+        let kernelSum = 0;
+        for (let dy = -r; dy <= r; dy++) {
+            for (let dx = -r; dx <= r; dx++) {
+                const wgt = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+                kernel.push(wgt);
+                kernelSum += wgt;
+            }
+        }
+        for (let i = 0; i < kernel.length; i++) kernel[i] /= kernelSum;
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let sum = 0;
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        sum += gray[ny * w + nx] * kernel[(dy + r) * blockSize + (dx + r)];
+                    }
+                }
+                const v = gray[y * w + x] > (sum - C) ? 255 : 0;
+                const di = (y * w + x) * 4;
+                dst[di] = dst[di + 1] = dst[di + 2] = v;
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Morphological opening: erode then dilate.
+     * Removes small dark spots (ink specks) while preserving large features.
+     * Critical for ink_data_pollution category.
+     */
+    morphOpen(imageData, kernelSize) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const bin = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            bin[i] = (src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114) < 128 ? 0 : 255;
+        }
+        const r = Math.floor((kernelSize || 3) / 2);
+
+        // Erode: if any neighbor is white, become white (remove small black dots)
+        const eroded = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let hasWhite = false;
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        if (bin[ny * w + nx] === 255) { hasWhite = true; break; }
+                    }
+                    if (hasWhite) break;
+                }
+                eroded[y * w + x] = hasWhite ? 255 : 0;
+            }
+        }
+
+        // Dilate: restore module edges
+        const opened = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let hasBlack = false;
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        if (eroded[ny * w + nx] === 0) { hasBlack = true; break; }
+                    }
+                    if (hasBlack) break;
+                }
+                opened[y * w + x] = hasBlack ? 0 : 255;
+            }
+        }
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let i = 0; i < w * h; i++) {
+            dst[i * 4] = dst[i * 4 + 1] = dst[i * 4 + 2] = opened[i];
+            dst[i * 4 + 3] = 255;
+        }
+        return out;
+    },
+
+    /**
+     * Simplified bilateral filter — spatial + range weighting.
+     * Smooths noise while preserving edges.
+     */
+    bilateralFilter(imageData, d, sigmaColor, sigmaSpace) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const gray = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            gray[i] = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+        }
+
+        const dia = d || 7, sc = sigmaColor || 50, ss = sigmaSpace || 50;
+        const r = Math.floor(dia / 2);
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const centerVal = gray[y * w + x];
+                let sum = 0, weightSum = 0;
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        const val = gray[ny * w + nx];
+                        const spatialW = Math.exp(-(dx * dx + dy * dy) / (2 * ss * ss));
+                        const rangeW = Math.exp(-((val - centerVal) * (val - centerVal)) / (2 * sc * sc));
+                        const wgt = spatialW * rangeW;
+                        sum += val * wgt;
+                        weightSum += wgt;
+                    }
+                }
+                const v = Math.round(sum / (weightSum + 1e-6));
+                const di = (y * w + x) * 4;
+                dst[di] = dst[di + 1] = dst[di + 2] = v;
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Morphological close: dilate then erode.
+     * Reconnects broken bars in 1D barcodes.
+     */
+    morphClose(imageData, kernelW, kernelH) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        const bin = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            bin[i] = (src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114) < 128 ? 0 : 255;
+        }
+        const kw = kernelW || 7, kh = kernelH || 1;
+        const rx = Math.floor(kw / 2), ry = Math.floor(kh / 2);
+
+        // Dilate
+        const dilated = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let hasBlack = false;
+                for (let dy = -ry; dy <= ry; dy++) {
+                    for (let dx = -rx; dx <= rx; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        if (bin[ny * w + nx] === 0) { hasBlack = true; break; }
+                    }
+                    if (hasBlack) break;
+                }
+                dilated[y * w + x] = hasBlack ? 0 : 255;
+            }
+        }
+
+        // Erode
+        const closed = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let allBlack = true;
+                for (let dy = -ry; dy <= ry; dy++) {
+                    for (let dx = -rx; dx <= rx; dx++) {
+                        const ny = clamp(y + dy, 0, h - 1), nx = clamp(x + dx, 0, w - 1);
+                        if (dilated[ny * w + nx] !== 0) { allBlack = false; break; }
+                    }
+                    if (!allBlack) break;
+                }
+                closed[y * w + x] = allBlack ? 0 : 255;
+            }
+        }
+
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        for (let i = 0; i < w * h; i++) {
+            dst[i * 4] = dst[i * 4 + 1] = dst[i * 4 + 2] = closed[i];
+            dst[i * 4 + 3] = 255;
+        }
+        return out;
+    },
+
+    /**
+     * Fast tier: most impactful variants ordered by diagnostic hit rate.
+     * median3 rescues the most images (92/210 for ink pollution) — must be first.
+     */
+    generateFastVariants(imageData) {
+        const variants = [];
+        const w = imageData.width, h = imageData.height;
+
+        // #1: Median denoise — highest hit rate across all damage types
+        variants.push({ tag: 'median3', data: this.medianBlur(imageData, 3) });
+
+        // #2: Median(5) + Bilateral heavy denoise — critical for ink pollution (31 extra images)
+        const med5 = this.medianBlur(imageData, 5);
+        const med5Gray = new Float32Array(w * h);
+        const m5d = med5.data;
+        for (let i = 0; i < w * h; i++) {
+            med5Gray[i] = m5d[i * 4] * 0.299 + m5d[i * 4 + 1] * 0.587 + m5d[i * 4 + 2] * 0.114;
+        }
+        // Build ImageData from med5 gray for bilateral input
+        const med5ImgData = new ImageData(w, h);
+        const m5di = med5ImgData.data;
+        for (let i = 0; i < w * h; i++) {
+            const v = Math.round(med5Gray[i]);
+            m5di[i * 4] = m5di[i * 4 + 1] = m5di[i * 4 + 2] = v;
+            m5di[i * 4 + 3] = 255;
+        }
+        variants.push({ tag: 'med5+bilat', data: this.bilateralFilter(med5ImgData, 7, 50, 50) });
+
+        // #3: CLAHE — for low contrast / noise
+        variants.push({ tag: 'clahe-c2', data: this.clahe(imageData, 2.0) });
+
+        // #4: Otsu — for data pollution
+        variants.push({ tag: 'otsu', data: this.otsuThreshold(imageData) });
+
+        // #5: Morphological opening — removes small ink specks (critical for QR ink pollution)
+        if (w < h * 2.0 && h < w * 2.0) {  // Square-ish → QR code
+            variants.push({ tag: 'morphOpen-3', data: this.morphOpen(imageData, 3) });
+            variants.push({ tag: 'morphOpen-5', data: this.morphOpen(imageData, 5) });
+        }
+
+        // #6: Wide adaptive threshold sweep (8 key combos — Python uses 16)
+        for (const [bs, c] of [[21, 5], [31, 9], [41, 13], [51, 9], [21, 13], [31, 5], [41, 9], [51, 13]]) {
+            variants.push({ tag: `adap-${bs}-${c}`, data: this.adaptiveThreshold(imageData, bs, c) });
+        }
+
+        // #7: Median3+CLAHE combo (for heavy noise)
+        const med3ForClahe = this.medianBlur(imageData, 3);
+        variants.push({ tag: 'med3+clahe', data: this.clahe(med3ForClahe, 2.0) });
+
+        // #8: median5 standalone (28 ink_pollution images)
+        variants.push({ tag: 'median5', data: this.medianBlur(imageData, 5) });
+
+        // #9: Morphological close — critical for ink pollution (41 images), all types
+        variants.push({ tag: 'morphClose-5x1', data: this.morphClose(imageData, 5, 1) });
+        if (w > h * 1.2) {
+            variants.push({ tag: 'morphClose-7x1', data: this.morphClose(imageData, 7, 1) });
+        }
+        variants.push({ tag: 'morphClose-3x3', data: this.morphClose(imageData, 3, 3) });
+
+        return variants;
+    },
+
+    /**
+     * Full sweep: comprehensive variants for stubborn images.
+     * Only called if fast tier didn't find anything.
+     */
+    generateFullVariants(imageData) {
+        const variants = [];
+        const w = imageData.width, h = imageData.height;
+
+        // Remaining CLAHE and combos
+        variants.push({ tag: 'clahe-c3', data: this.clahe(imageData, 3.0) });
+        const med3 = this.medianBlur(imageData, 3);
+        const med3Gray = new Float32Array(w * h);
+        const m3d = med3.data;
+        for (let i = 0; i < w * h; i++) med3Gray[i] = m3d[i * 4];
+        const med3Img = new ImageData(w, h);
+        const m3di = med3Img.data;
+        for (let i = 0; i < w * h; i++) {
+            const v = Math.round(med3Gray[i]);
+            m3di[i*4]=m3di[i*4+1]=m3di[i*4+2]=v; m3di[i*4+3]=255;
+        }
+        variants.push({ tag: 'med3+clahe', data: this.clahe(med3Img, 2.0) });
+
+        // Full adaptive threshold sweep
+        for (const bs of [21, 31, 41, 51]) {
+            for (const c of [3, 5, 9, 13]) {
+                const tag = `adap-${bs}-${c}`;
+                if (!variants.some(v => v.tag === tag)) {
+                    variants.push({ tag, data: this.adaptiveThreshold(imageData, bs, c) });
+                }
+            }
+        }
+
+        // Extended morphological close (barcodes)
+        if (w > h * 1.2) {
+            for (const [kw, kh] of [[3, 1], [7, 3], [7, 5]]) {
+                variants.push({ tag: `morphClose-${kw}x${kh}`, data: this.morphClose(imageData, kw, kh) });
+            }
+        }
+
+        // Inverted adaptive threshold (catches white-on-black prints)
+        variants.push({ tag: 'adap-inv-31-9', data: this.invert(this.adaptiveThreshold(imageData, 31, 9)) });
+
+        return variants;
+    },
+
+    /** Invert binary ImageData (255 ↔ 0). */
+    invert(imageData) {
+        const out = new ImageData(imageData.width, imageData.height);
+        const src = imageData.data, dst = out.data;
+        for (let i = 0; i < src.length; i += 4) {
+            const v = 255 - src[i];
+            dst[i] = dst[i + 1] = dst[i + 2] = v;
+            dst[i + 3] = 255;
+        }
+        return out;
+    }
+};
 
 function scanQrIterative(pixelData, w, h, label, maxIter) {
     const out = [];
@@ -413,6 +1064,38 @@ async function scanRegions(canvas, w, h) {
     return results;
 }
 
+/**
+ * Run BarcodeDetector on a canvas with 3-level fallback.
+ * Returns array of { rawValue, format }.
+ */
+async function runBarcodeDetector(canvas, wantQr, wantBarcode) {
+    let detected = [];
+    if (!('BarcodeDetector' in window)) return detected;
+    try {
+        const fmts = [];
+        if (wantQr) fmts.push('qr_code');
+        if (wantBarcode) fmts.push('ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'code_93', 'codabar', 'itf');
+        detected = await new BarcodeDetector({ formats: fmts }).detect(canvas);
+    } catch (e1) {
+        try {
+            const sup = await BarcodeDetector.getSupportedFormats();
+            const fmts = [];
+            if (wantQr && sup.includes('qr_code')) fmts.push('qr_code');
+            if (wantBarcode) {
+                for (const f of ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'code_93', 'codabar', 'itf']) {
+                    if (sup.includes(f)) fmts.push(f);
+                }
+            }
+            if (fmts.length > 0) detected = await new BarcodeDetector({ formats: fmts }).detect(canvas);
+        } catch (e2) {
+            try {
+                if (wantQr) detected = await new BarcodeDetector({ formats: ['qr_code'] }).detect(canvas);
+            } catch (e3) {}
+        }
+    }
+    return detected;
+}
+
 async function decodeImageFile(file, scanFormat) {
     const img = await loadImage(file);
     const canvas = document.createElement('canvas');
@@ -427,59 +1110,153 @@ async function decodeImageFile(file, scanFormat) {
     const wantBarcode = scanFormat === 'all' || scanFormat === 'barcode';
     const merged = [];
 
-    // ====== BarcodeDetector: 3-level fallback ======
-    if ((wantQr || wantBarcode) && 'BarcodeDetector' in window) {
-        let detected = [];
-        // Level 1: all requested formats
-        try {
-            const fmts = [];
-            if (wantQr) fmts.push('qr_code');
-            if (wantBarcode) fmts.push('ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf');
-            detected = await new BarcodeDetector({ formats: fmts }).detect(canvas);
-        } catch (e1) {
-            // Level 2: validate with getSupportedFormats
-            try {
-                const sup = await BarcodeDetector.getSupportedFormats();
-                const fmts = [];
-                if (wantQr && sup.includes('qr_code')) fmts.push('qr_code');
-                if (wantBarcode) {
-                    for (const f of ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','codabar','itf']) {
-                        if (sup.includes(f)) fmts.push(f);
-                    }
-                }
-                if (fmts.length > 0) detected = await new BarcodeDetector({ formats: fmts }).detect(canvas);
-            } catch (e2) {
-                // Level 3: qr_code only (most widely supported)
-                try {
-                    if (wantQr) detected = await new BarcodeDetector({ formats: ['qr_code'] }).detect(canvas);
-                } catch (e3) { /* all failed */ }
-            }
+    // ====== v2.0.3 Preprocessing variants (CLAHE, Otsu, adaptive, morph) ======
+    // Tiered approach: fast impactful variants first, full sweep only if needed
+    const fastVariants = Preprocess.generateFastVariants(imageData);
+    const fullVariants = Preprocess.generateFullVariants(imageData);
+
+    // ====== v2.0.1 Geometric Correction ======
+    // Generate corrected variants for cylinder/perspective distortion
+    let correctedVariants = [];
+    if (w > h * 1.2) {
+        // Wide image: likely barcode — try cylinder unwarp + perspective normalize
+        correctedVariants.push({ tag: 'persp-norm', data: GeoCorrect.normalizePerspective(imageData) });
+        const cylVariants = GeoCorrect.unwarpBarcodeMulti(imageData);
+        for (const v of cylVariants) {
+            correctedVariants.push({ tag: `barcode-cyl-c${v.curvature.toFixed(2)}`, data: v.data });
+            // Also try cylinder unwarp followed by perspective normalize (combo)
+            correctedVariants.push({
+                tag: `cyl-c${v.curvature.toFixed(2)}+persp`,
+                data: GeoCorrect.normalizePerspective(v.data)
+            });
         }
-        for (const b of detected) {
-            const isQr = b.format === 'qr_code' || b.format === 'QR Code';
-            merged.push({ text: b.rawValue, type: isQr ? 'QR Code' : 'Barcode',
-                          confidence: 'BarcodeDetector ✓' });
+    }
+    if (wantQr && h > 40 && w > 40) {
+        const qrVariants = GeoCorrect.unwarpQRMulti(imageData);
+        for (const v of qrVariants) {
+            correctedVariants.push({ tag: `qr-cyl-c${v.curvature.toFixed(2)}`, data: v.data });
         }
     }
 
-    // ====== jsQR crusafe passes (no attemptBoth — we handle inversion manually) ======
+    // ====== Fragment extraction (for edge_tear / torn images) ======
+    const fragments = GeoCorrect.extractFragments(imageData);
+    for (const frag of fragments) {
+        correctedVariants.push(frag);
+    }
+
+    // Fast jsQR-only decode on a variant (no BarcodeDetector — too slow on binarized images)
+    function jsqrQuick(variant) {
+        if (!wantQr) return false;
+        const d = variant.data;
+        const r = safeJsQR(d.data, d.width, d.height);
+        if (r && r.data) {
+            insertUnique(merged, { text: normalizeText(r.data), type: 'QR Code', confidence: `jsQR(${variant.tag})` });
+            return true;
+        }
+        // Inverted quick pass
+        const inv = inverted(d.data);
+        const r2 = safeJsQR(inv, d.width, d.height);
+        if (r2 && r2.data) {
+            insertUnique(merged, { text: normalizeText(r2.data), type: 'QR Code', confidence: `jsQR(${variant.tag}/inv)` });
+            return true;
+        }
+        return false;
+    }
+
+    // Run BarcodeDetector on a canvas (original or geometric variants only — clean images)
+    async function bdOnCanvas(cv, tag) {
+        if (!wantQr && !wantBarcode) return false;
+        try {
+            const detected = await runBarcodeDetector(cv, wantQr, wantBarcode);
+            for (const b of detected) {
+                const isQr = b.format === 'qr_code' || b.format === 'QR Code';
+                if (!hasText(merged, b.rawValue)) {
+                    merged.push({ text: normalizeText(b.rawValue), type: isQr ? 'QR Code' : 'Barcode',
+                                  confidence: `BarcodeDetector(${tag})` });
+                }
+            }
+            return detected.length > 0;
+        } catch { return false; }
+    }
+
+    function toCanvas(imgData) {
+        const cv = document.createElement('canvas');
+        cv.width = imgData.width; cv.height = imgData.height;
+        cv.getContext('2d').putImageData(imgData, 0, 0);
+        return cv;
+    }
+
+    // ====== Phase 1: Original image (BarcodeDetector + jsQR, parallel) ======
+    // ====== Phase 1: Fast BD on original (most gallery images decode here) ======
+    const bdPromise = bdOnCanvas(canvas, 'original');
+
+    // jsQR on original in parallel
     if (wantQr) {
         const enhanced = grayscaleEnhance(imageData);
-
-        // Normal enhanced
-        insertUnique(merged, scanQrIterative(enhanced.data, w, h, 'jsQR ✓', 25));
-
-        // Raw colour
-        insertUnique(merged, scanQrIterative(imageData.data, w, h, 'jsQR (raw)', 25));
-
-        // Inverted enhanced
-        insertUnique(merged, scanQrIterative(inverted(enhanced.data), w, h, 'jsQR (inv)', 15));
-
-        // Inverted raw
-        insertUnique(merged, scanQrIterative(inverted(imageData.data), w, h, 'jsQR (raw inv)', 15));
+        for (const [label, data, maxIter] of [
+            ['jsQR', enhanced.data, 20], ['raw', imageData.data, 15],
+            ['inv', inverted(enhanced.data), 12], ['raw-inv', inverted(imageData.data), 10]
+        ]) {
+            const r = scanQrIterative(data, w, h, label, maxIter);
+            if (r) { insertUnique(merged, r); break; }
+        }
     }
 
-    // ====== Speckle removal: morphological opening to clear 1-4px ink dots ======
+    // Await BD result — if original image decoded, skip entire pipeline
+    await bdPromise;
+    if (merged.length > 0) return merged;
+
+    // ====== Phase 2: Fast preprocessing (jsQR only, ~15 variants < 300ms total) ======
+    if (merged.length === 0) {
+        for (const variant of fastVariants) {
+            if (jsqrQuick(variant)) break;
+        }
+    }
+
+    // ====== Phase 3: Geometric correction (BD on key variants, jsQR first) ======
+    if (merged.length === 0) {
+        // Try jsQR on all geometry variants first (fast, may work on mild distortion)
+        for (const variant of correctedVariants) {
+            if (wantQr && jsqrQuick(variant)) break;
+        }
+        // BD on sparse subset: every 2nd QR variant (covers full range with 1/2 cost)
+        if (merged.length === 0) {
+            let idx = 0;
+            for (const variant of correctedVariants) {
+                const runBd = wantQr ? (idx % 2 === 0) : (idx < 3 || variant.tag.includes('persp'));
+                if (runBd) {
+                    const cv = toCanvas(variant.data);
+                    if (await bdOnCanvas(cv, variant.tag)) break;
+                }
+                idx++;
+            }
+        }
+    }
+
+    // ====== Phase 4: Original BarcodeDetector result (awaited from Phase 1) ======
+    if (merged.length === 0) {
+        await bdPromise;  // Already ran, just awaiting
+    }
+
+    // ====== Phase 5: Full sweep (stubborn images only) ======
+    if (merged.length === 0) {
+        for (const variant of fullVariants) {
+            if (wantQr && jsqrQuick(variant)) break;
+        }
+        // If still nothing, try BD on full variants too
+        if (merged.length === 0) {
+            for (const variant of fullVariants.slice(0, 8)) {
+                const cv = toCanvas(variant.data);
+                if (await bdOnCanvas(cv, variant.tag)) break;
+            }
+        }
+    }
+
+    if (merged.length > 0) return merged;
+
+    if (merged.length > 0) return merged;
+
+    // ====== Final fallback: Speckle removal + region scan ======
     if (wantQr) {
         try {
             const specCanvas = document.createElement('canvas');
@@ -650,7 +1427,10 @@ function inverted(data) {
 
 function insertUnique(dest, items) {
     for (const r of items) {
-        if (!dest.some(m => m.text === r.text)) {
+        const text = normalizeText(r.text);
+        if (!isValidDecodedText(text, null)) continue;
+        if (!hasText(dest, text)) {
+            r.text = text;
             dest.push(r);
         }
     }
@@ -836,6 +1616,362 @@ function playBeep() {
     } catch {
         // Audio not available
     }
+}
+
+// ============================================================================
+// Geometric Correction v2.0.1 — Cylinder Unwarp + Perspective Normalize
+// Ported from Python advanced_cv_scanner.py to JavaScript for mobile app
+// ============================================================================
+
+const GeoCorrect = {
+    /**
+     * Estimate cylinder curvature from image content aspect ratio.
+     * A square QR code compressed horizontally by cylinder projection
+     * has aspect ratio = contentWidth / contentHeight ≈ sinc(c*PI).
+     */
+    estimateCurvature(imageData) {
+        const w = imageData.width, h = imageData.height;
+        const d = imageData.data;
+        // Find content bounding box (non-white pixels)
+        let minX = w, maxX = 0, minY = h, maxY = 0;
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const i = (y * w + x) * 4;
+                const gray = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+                if (gray < 240) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+        const cw = maxX - minX + 1, ch = maxY - minY + 1;
+        if (cw < 30 || ch < 30) return 0.15;
+        const ratio = Math.min(cw / Math.max(ch, 1), 1.0);
+        // Invert sinc(c*PI + 0.01) = ratio via lookup
+        let bestC = 0.15, bestDiff = 999;
+        for (let c = 0.04; c <= 0.45; c += 0.01) {
+            const arg = c * Math.PI + 0.01;
+            const expected = arg > 0.001 ? Math.sin(arg) / arg : 1.0;
+            const diff = Math.abs(expected - ratio);
+            if (diff < bestDiff) { bestDiff = diff; bestC = c; }
+        }
+        return Math.max(0.04, Math.min(0.45, bestC));
+    },
+
+    /**
+     * Horizontal-only cylinder inverse unwarp for 1D barcodes.
+     * Forward:  x' = cx + R * sin((x - cx) / R),  y' = y
+     * Inverse:  x  = cx + R * arcsin((x' - cx) / R),  y = y'
+     */
+    unwarpBarcode(imageData, curvature) {
+        const w = imageData.width, h = imageData.height;
+        const src = imageData.data;
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        const cx = w / 2.0;
+        const R = Math.max(w * 0.3, w / (curvature * Math.PI * 2 + 0.01));
+
+        for (let y = 0; y < h; y++) {
+            const row = y * w;
+            for (let xDst = 0; xDst < w; xDst++) {
+                const dxNorm = Math.max(-0.9999, Math.min(0.9999, (xDst - cx) / R));
+                const xSrc = Math.round(cx + R * Math.asin(dxNorm));
+                const sx = Math.max(0, Math.min(w - 1, xSrc));
+                const si = (row + sx) * 4;
+                const di = (row + xDst) * 4;
+                dst[di] = src[si];
+                dst[di + 1] = src[si + 1];
+                dst[di + 2] = src[si + 2];
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Full cylinder inverse unwarp for QR codes.
+     * Forward:  x' = cx + R*sin((x-cx)/R), y' = cy + (y-cy)*R/sqrt(R²+(x-cx)²)
+     * Inverse:  x  = cx + R*arcsin((x'-cx)/R), y = cy + (y'-cy)*sqrt(1+arcsin²)
+     */
+    unwarpQR(imageData, curvature) {
+        const w = imageData.width, h = imageData.height;
+        const src = imageData.data;
+        const out = new ImageData(w, h);
+        const dst = out.data;
+        const cx = w / 2.0, cy = h / 2.0;
+        const R = Math.max(50, (w / 2) / (curvature * Math.PI + 0.01));
+
+        for (let yDst = 0; yDst < h; yDst++) {
+            for (let xDst = 0; xDst < w; xDst++) {
+                const dxNorm = Math.max(-0.9999, Math.min(0.9999, (xDst - cx) / R));
+                const arcTerm = Math.asin(dxNorm);
+                const xSrc = Math.round(cx + R * arcTerm);
+                const depthFactor = Math.sqrt(1.0 + arcTerm * arcTerm);
+                const ySrc = Math.round(cy + (yDst - cy) * depthFactor);
+                const sx = Math.max(0, Math.min(w - 1, xSrc));
+                const sy = Math.max(0, Math.min(h - 1, ySrc));
+                const si = (sy * w + sx) * 4;
+                const di = (yDst * w + xDst) * 4;
+                dst[di] = src[si];
+                dst[di + 1] = src[si + 1];
+                dst[di + 2] = src[si + 2];
+                dst[di + 3] = 255;
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Detect and normalize perspective distortion in barcode images.
+     * Uses row-variance to find barcode region boundaries, then applies
+     * inverse perspective (homography) to flatten.
+     */
+    normalizePerspective(imageData) {
+        const w = imageData.width, h = imageData.height;
+        if (w < h * 1.2) return imageData;  // Only for wide (barcode-like) images
+
+        const d = imageData.data;
+        const topPts = [], botPts = [];
+        const step = Math.max(1, Math.floor(w / 30));
+
+        for (let x = 0; x < w; x += step) {
+            // Compute row variances for this column slice
+            const window = 15;
+            const variances = [];
+            for (let y = 0; y < h - window; y++) {
+                let sum = 0, sumSq = 0;
+                for (let dy = 0; dy < window; dy++) {
+                    const idx = ((y + dy) * w + x) * 4;
+                    const gray = d[idx] * 0.299 + d[idx + 1] * 0.587 + d[idx + 2] * 0.114;
+                    sum += gray; sumSq += gray * gray;
+                }
+                const mean = sum / window;
+                variances.push(sumSq / window - mean * mean);
+            }
+            const maxVar = Math.max(...variances);
+            if (maxVar > 80) {
+                const thresh = maxVar * 0.25;
+                let first = -1, last = -1;
+                for (let i = 0; i < variances.length; i++) {
+                    if (variances[i] > thresh) { if (first < 0) first = i; last = i; }
+                }
+                if (first >= 0) {
+                    topPts.push([x, first + Math.floor(window / 2)]);
+                    botPts.push([x, last + Math.floor(window / 2)]);
+                }
+            }
+        }
+
+        if (topPts.length < 10) return imageData;
+
+        // Fit quadratic polynomial to boundary points
+        try {
+            const topPoly = fitQuadratic(topPts);
+            const botPoly = fitQuadratic(botPts);
+            if (!topPoly || !botPoly) return imageData;
+
+            const tl = clamp(topPoly(0), 0, h - 1), tr = clamp(topPoly(w - 1), 0, h - 1);
+            const bl = clamp(botPoly(0), 0, h - 1), br = clamp(botPoly(w - 1), 0, h - 1);
+
+            const lh = Math.abs(bl - tl), rh = Math.abs(br - tr);
+            if (Math.min(lh, rh) < 10 || Math.max(lh, rh) / Math.max(Math.min(lh, rh), 1) < 1.25) {
+                return imageData;
+            }
+
+            // Inverse perspective using 2D remap
+            const out = new ImageData(w, h);
+            const od = out.data;
+            const targetH = Math.min(h, Math.floor(Math.max(lh, rh) * 1.3));
+
+            // Build homography from src->dst: map irregular quad to rectangle
+            const srcPts = [[0, tl], [w - 1, tr], [w - 1, br], [0, bl]];
+            const dstPts = [[0, 0], [w - 1, 0], [w - 1, targetH - 1], [0, targetH - 1]];
+            const H = computeHomography(dstPts, srcPts);  // inverse: dst->src
+
+            for (let y = 0; y < targetH; y++) {
+                for (let x = 0; x < w; x++) {
+                    const [sx, sy] = applyHomography(H, x, y);
+                    const isx = clamp(Math.round(sx), 0, w - 1);
+                    const isy = clamp(Math.round(sy), 0, h - 1);
+                    const si = (isy * w + isx) * 4;
+                    const di = (y * w + x) * 4;
+                    od[di] = d[si]; od[di + 1] = d[si + 1]; od[di + 2] = d[si + 2]; od[di + 3] = 255;
+                }
+            }
+            // Fill remaining rows with white
+            for (let y = targetH; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const di = (y * w + x) * 4;
+                    od[di] = 255; od[di + 1] = 255; od[di + 2] = 255; od[di + 3] = 255;
+                }
+            }
+            return out;
+        } catch {
+            return imageData;
+        }
+    },
+
+    /**
+     * Try multiple curvature values and return all unwarped images.
+     */
+    unwarpBarcodeMulti(imageData) {
+        const results = [];
+        const curvatures = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35];
+        for (const c of curvatures) {
+            results.push({ curvature: c, data: this.unwarpBarcode(imageData, c) });
+        }
+        return results;
+    },
+
+    unwarpQRMulti(imageData) {
+        const results = [];
+        // 10 curvature values (step 0.04) — balanced speed vs coverage
+        for (let c = 0.04; c <= 0.40; c += 0.04) {
+            results.push({ curvature: c, data: this.unwarpQR(imageData, c) });
+        }
+        return results;
+    },
+
+    /**
+     * Extract content fragments from torn/split images.
+     * Detects connected non-white regions and returns each as a separate ImageData.
+     * Ported from Python AdvancedCVScanner V12 multi-fragment splitting.
+     */
+    extractFragments(imageData) {
+        const w = imageData.width, h = imageData.height, src = imageData.data;
+        // Binary: non-white (gray < 250) = content, white = background
+        const bin = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+            const gray = src[i * 4] * 0.299 + src[i * 4 + 1] * 0.587 + src[i * 4 + 2] * 0.114;
+            bin[i] = gray < 250 ? 1 : 0;
+        }
+
+        // BFS connected components
+        const labels = new Int32Array(w * h).fill(-1);
+        let nextLabel = 0;
+        const fragments = [];  // {x, y, w, h, label}
+
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const idx = y * w + x;
+                if (bin[idx] !== 1 || labels[idx] >= 0) continue;
+
+                // BFS this component
+                const queue = [[x, y]];
+                labels[idx] = nextLabel;
+                let minX = x, maxX = x, minY = y, maxY = y;
+                let qi = 0;
+                while (qi < queue.length) {
+                    const [cx, cy] = queue[qi++];
+                    for (const [dx, dy] of [[0, 1], [1, 0], [0, -1], [-1, 0], [1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+                        const nx = cx + dx, ny = cy + dy;
+                        if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                            const ni = ny * w + nx;
+                            if (bin[ni] === 1 && labels[ni] < 0) {
+                                labels[ni] = nextLabel;
+                                queue.push([nx, ny]);
+                                if (nx < minX) minX = nx; if (nx > maxX) maxX = nx;
+                                if (ny < minY) minY = ny; if (ny > maxY) maxY = ny;
+                            }
+                        }
+                    }
+                }
+
+                const area = (maxX - minX + 1) * (maxY - minY + 1);
+                if (area > 1000 && queue.length > 50) {
+                    fragments.push({ x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, label: nextLabel });
+                }
+                nextLabel++;
+            }
+        }
+
+        if (fragments.length <= 1) return [];
+
+        // Extract each fragment as ImageData
+        const results = [];
+        for (const frag of fragments) {
+            if (frag.w < 25 || frag.h < 25) continue;
+            const out = new ImageData(frag.w, frag.h);
+            const dst = out.data;
+            for (let fy = 0; fy < frag.h; fy++) {
+                for (let fx = 0; fx < frag.w; fx++) {
+                    const si = ((frag.y + fy) * w + (frag.x + fx)) * 4;
+                    const di = (fy * frag.w + fx) * 4;
+                    dst[di] = src[si]; dst[di + 1] = src[si + 1];
+                    dst[di + 2] = src[si + 2]; dst[di + 3] = 255;
+                }
+            }
+            results.push({ tag: `frag-${frag.label}`, data: out });
+        }
+        return results;
+    }
+};
+
+// ---- Numerical helpers ----
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function fitQuadratic(pts) {
+    const n = pts.length;
+    let sx = 0, sx2 = 0, sx3 = 0, sx4 = 0, sy = 0, sxy = 0, sx2y = 0;
+    for (const [x, y] of pts) {
+        const x2 = x * x;
+        sx += x; sx2 += x2; sx3 += x2 * x; sx4 += x2 * x2;
+        sy += y; sxy += x * y; sx2y += x2 * y;
+    }
+    const denom = n * (sx2 * sx4 - sx3 * sx3) - sx * (sx * sx4 - sx2 * sx3) + sx2 * (sx * sx3 - sx2 * sx2);
+    if (Math.abs(denom) < 1e-9) return null;
+    const a = (n * (sx2 * sx2y - sx3 * sxy) - sx * (sx * sx2y - sx2 * sxy) + sx2 * (sx * sxy - sx2 * sy)) / denom;
+    const b = (n * (sx4 * sxy - sx3 * sx2y) - sx2 * (sx2 * sxy - sx * sx2y) + sx * (sx2 * sx2y - sx * sxy)) / denom;
+    const c_val = (sy - a * sx2 - b * sx) / n;
+    return x => a * x * x + b * x + c_val;
+}
+
+function computeHomography(srcPts, dstPts) {
+    // Solve for H (3x3) mapping src (4 corners) -> dst (4 corners)
+    // |x'|   |h11 h12 h13| |x|
+    // |y'| = |h21 h22 h23| |y|   with h33=1
+    // |w'|   |h31 h32  1 | |1|
+    const A = [];
+    const B = [];
+    for (let i = 0; i < 4; i++) {
+        const [sx, sy] = srcPts[i];
+        const [dx, dy] = dstPts[i];
+        A.push([sx, sy, 1, 0, 0, 0, -dx * sx, -dx * sy]);
+        A.push([0, 0, 0, sx, sy, 1, -dy * sx, -dy * sy]);
+        B.push(dx, dy);
+    }
+    // Solve linear system A * h = B using Gaussian elimination
+    const n = 8;
+    const M = A.map((row, i) => [...row, B[i]]);
+    for (let col = 0; col < n; col++) {
+        let pivot = col;
+        for (let row = col; row < n; row++) {
+            if (Math.abs(M[row][col]) > Math.abs(M[pivot][col])) pivot = row;
+        }
+        [M[col], M[pivot]] = [M[pivot], M[col]];
+        const pv = M[col][col];
+        if (Math.abs(pv) < 1e-9) continue;
+        for (let j = col; j <= n; j++) M[col][j] /= pv;
+        for (let row = 0; row < n; row++) {
+            if (row === col) continue;
+            const f = M[row][col];
+            for (let j = col; j <= n; j++) M[row][j] -= f * M[col][j];
+        }
+    }
+    return [M[0][8], M[1][8], M[2][8], M[3][8], M[4][8], M[5][8], M[6][8], M[7][8], 1.0];
+}
+
+function applyHomography(H, x, y) {
+    const h11 = H[0], h12 = H[1], h13 = H[2];
+    const h21 = H[3], h22 = H[4], h23 = H[5];
+    const h31 = H[6], h32 = H[7], h33 = H[8];
+    const w = h31 * x + h32 * y + h33;
+    const sx = (h11 * x + h12 * y + h13) / w;
+    const sy = (h21 * x + h22 * y + h23) / w;
+    return [sx, sy];
 }
 
 // ============ PWA Registration ============
