@@ -8,7 +8,7 @@
 const state = {
     scanner: null,
     isScanning: false,
-    scanFormat: 'qr',        // 'qr' | 'barcode' | 'all' (default QR to reduce false positives)
+    scanFormat: 'all',       // 'all' | 'qr' | 'barcode'
     facingMode: 'environment',
     flashlightOn: false,
     hasFlashlight: false,
