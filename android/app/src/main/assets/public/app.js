@@ -209,6 +209,33 @@ async function toggleFlashlight() {
     }
 }
 
+// Normalize decoded text: trim whitespace, collapse newlines, remove BOM
+function normalizeText(text) {
+    if (!text) return '';
+    return text.replace(/^\s+|\s+$/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n+/g, '\n').trim();
+}
+
+function sameText(a, b) {
+    return normalizeText(a) === normalizeText(b);
+}
+
+function hasText(arr, text) {
+    return arr.some(m => sameText(m.text, text));
+}
+
+// Filter garbled / invalid decoded text
+function isValidDecodedText(text) {
+    if (!text || text.length < 2) return false;
+    // Reject results with too many control characters or non-printable chars
+    const clean = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
+    if (clean.length < text.length * 0.5) return false;
+    // Reject extremely high-entropy short strings (random garbage)
+    if (text.length <= 6 && /[^\x20-\x7e]/.test(text)) return false;
+    // Reject strings that are purely non-ASCII garbage
+    if (text.length <= 10 && /^[^\x20-\x7e]+$/.test(text)) return false;
+    return true;
+}
+
 function getScanFormats() {
     switch (state.scanFormat) {
         case 'qr':
@@ -227,22 +254,32 @@ function getScanFormats() {
 function onScanSuccess(decodedText, decodedResult) {
     if (!state.isScanning) return;
 
+    const normalized = normalizeText(decodedText);
+
+    // Skip invalid/garbled results
+    if (!isValidDecodedText(normalized)) return;
+
     const formatName = decodedResult.result.format?.formatName || 'unknown';
     const type = formatName === 'qr_code' ? 'QR Code' : 'Barcode';
 
-    // Skip duplicates during this scan session
-    if (state.cameraResults.some(r => r.text === decodedText)) return;
+    // Skip duplicates (check normalized text)
+    if (hasText(state.cameraResults, normalized)) return;
 
     if (state.soundEnabled) playBeep();
 
-    state.cameraResults.push({ text: decodedText, type: type });
+    state.cameraResults.push({ text: normalized, type: type });
     addToHistory(decodedText, type);
 
     const card = document.getElementById('resultCard');
     card.style.display = 'block';
 
+    // Limit camera results to 8 to prevent spam
+    if (state.cameraResults.length > 8) {
+        state.cameraResults.shift();
+    }
+
     if (state.cameraResults.length === 1) {
-        displayResult(decodedText, type, 'resultCard', 'resultType', 'resultContent', 'resultConfidence');
+        displayResult(normalized, type, 'resultCard', 'resultType', 'resultContent', 'resultConfidence');
         showToast('已扫描 1 个, 继续扫描中...');
     } else {
         card.innerHTML = buildMultiSelectHtml(state.cameraResults);
@@ -1033,14 +1070,14 @@ async function decodeImageFile(file, scanFormat) {
         const d = variant.data;
         const r = safeJsQR(d.data, d.width, d.height);
         if (r && r.data) {
-            insertUnique(merged, { text: r.data, type: 'QR Code', confidence: `jsQR(${variant.tag})` });
+            insertUnique(merged, { text: normalizeText(r.data), type: 'QR Code', confidence: `jsQR(${variant.tag})` });
             return true;
         }
         // Inverted quick pass
         const inv = inverted(d.data);
         const r2 = safeJsQR(inv, d.width, d.height);
         if (r2 && r2.data) {
-            insertUnique(merged, { text: r2.data, type: 'QR Code', confidence: `jsQR(${variant.tag}/inv)` });
+            insertUnique(merged, { text: normalizeText(r2.data), type: 'QR Code', confidence: `jsQR(${variant.tag}/inv)` });
             return true;
         }
         return false;
@@ -1053,8 +1090,8 @@ async function decodeImageFile(file, scanFormat) {
             const detected = await runBarcodeDetector(cv, wantQr, wantBarcode);
             for (const b of detected) {
                 const isQr = b.format === 'qr_code' || b.format === 'QR Code';
-                if (!merged.some(m => m.text === b.rawValue)) {
-                    merged.push({ text: b.rawValue, type: isQr ? 'QR Code' : 'Barcode',
+                if (!hasText(merged, b.rawValue)) {
+                    merged.push({ text: normalizeText(b.rawValue), type: isQr ? 'QR Code' : 'Barcode',
                                   confidence: `BarcodeDetector(${tag})` });
                 }
             }
@@ -1091,18 +1128,24 @@ async function decodeImageFile(file, scanFormat) {
         }
     }
 
-    // ====== Phase 3: Geometric correction (BarcodeDetector only on important ones) ======
+    // ====== Phase 3: Geometric correction ======
     if (merged.length === 0) {
-        // Only run BD on the first 3 geometric variants (most likely to work)
-        let geoBdCount = 0;
-        for (const variant of correctedVariants) {
-            // jsQR first (fast)
-            if (wantQr && jsqrQuick(variant)) break;
-            // BarcodeDetector on first 3 or perspective-normalized ones
-            if (geoBdCount < 3 || variant.tag.includes('persp')) {
+        if (wantQr) {
+            // QR: jsQR useless on cylinder distortion → BD on ALL curvature values
+            for (const variant of correctedVariants) {
                 const cv = toCanvas(variant.data);
                 if (await bdOnCanvas(cv, variant.tag)) break;
-                geoBdCount++;
+            }
+        } else {
+            // Barcode: jsQR first (works), BD on first 3 + perspective
+            let geoBdCount = 0;
+            for (const variant of correctedVariants) {
+                if (jsqrQuick(variant)) break;
+                if (geoBdCount < 3 || variant.tag.includes('persp')) {
+                    const cv = toCanvas(variant.data);
+                    if (await bdOnCanvas(cv, variant.tag)) break;
+                    geoBdCount++;
+                }
             }
         }
     }
@@ -1301,7 +1344,10 @@ function inverted(data) {
 
 function insertUnique(dest, items) {
     for (const r of items) {
-        if (!dest.some(m => m.text === r.text)) {
+        const text = normalizeText(r.text);
+        if (!isValidDecodedText(text)) continue;
+        if (!hasText(dest, text)) {
+            r.text = text;
             dest.push(r);
         }
     }
