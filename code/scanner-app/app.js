@@ -866,11 +866,11 @@ const Preprocess = {
         const med3 = this.medianBlur(imageData, 3);
         const med3Gray = new Float32Array(w * h);
         const m3d = med3.data;
-        for (let i = 0; i < w * h; i++) m3Gray[i] = m3d[i * 4];
+        for (let i = 0; i < w * h; i++) med3Gray[i] = m3d[i * 4];
         const med3Img = new ImageData(w, h);
         const m3di = med3Img.data;
         for (let i = 0; i < w * h; i++) {
-            const v = Math.round(m3Gray[i]);
+            const v = Math.round(med3Gray[i]);
             m3di[i*4]=m3di[i*4+1]=m3di[i*4+2]=v; m3di[i*4+3]=255;
         }
         variants.push({ tag: 'med3+clahe', data: this.clahe(med3Img, 2.0) });
